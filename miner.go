@@ -14,35 +14,43 @@ package main
 import (
 	"crypto/md5"
 	"encoding/hex"
+	"errors"
+	"fmt"
+	"log"
+	"net"
+	"net/http"
+	"net/rpc"
 
 	"github.ugrad.cs.ubc.ca/CPSC416-2018W-T1/P1-i8b0b-e8y0b/rfslib"
 	// TODO
 )
 
-// Block is the base class of GenesisBlock, NOPBlock and OPBlock
-type Block struct {
+// AbstractBlock is the interface of GenesisBlock, NOPBlock and OPBlock
+type AbstractBlock interface {
+}
+
+// ActualBlock is the "base class" of GenesisBlock, NOPBlock and OPBlock
+type ActualBlock struct {
+	Block   AbstractBlock
 	MinerID string // The identifier of the miner that computed this block (block-minerID)
 }
 
 // GenesisBlock is the first block in this blockchain
 type GenesisBlock struct {
-	Block
 	Hash string // The genesis (first) block MD5 hash for this blockchain
 }
 
 // NOPBlock is a No-OP Block
 type NOPBlock struct {
-	Block
 	PrevHash string // A hash of the previous block in the chain (prev-hash)
-	Nonce    uint32 //A 32-bit unsigned integer nonce (nonce)
+	Nonce    uint32 // A 32-bit unsigned integer nonce (nonce)
 }
 
 // OPBlock is a OP Block with non-empty Records
 type OPBlock struct {
-	Block
 	PrevHash string            // A hash of the previous block in the chain (prev-hash)
 	Records  []OperationRecord // An ordered set of operation records
-	Nonce    uint32            //A 32-bit unsigned integer nonce (nonce)
+	Nonce    uint32            // A 32-bit unsigned integer nonce (nonce)
 }
 
 // OperationRecord is a file operation on the block chain
@@ -72,22 +80,19 @@ type Miner struct {
 	ConfirmsPerFileAppend  uint8  // The number of confirmations for an append operation (the number of blocks that must follow the block containing an append operation along longest chain before the AppendRec call can return successfully). Note that this append confirm number will always be set to be larger than the create confirm number (above).
 }
 
+// ClientAPI is the set of RPC calls provided to RFS
+type ClientAPI struct {
+	IncomingClientsAddr string // The local IP:port where this miner should expect to receive connections from RFS clients (address it should listen on for connections from clients)
+}
+
+// MinerAPI is the set of RPC calls provided to other miners
+type MinerAPI struct {
+	PeerMinersAddrs    []string // An array of remote IP:port addresses, one per peer miner that this miner should connect to (using the OutgoingMinersIP below)
+	IncomingMinersAddr string   // The local IP:port where the miner should expect other miners to connect to it (address it should listen on for connections from miners)
+}
+
 var chain map[string]OPBlock
-
-/////////// Msgs used by both auth and fortune servers:
-
-// An error message from the server.
-type ErrMessage struct {
-	Error string
-}
-
-/////////// Auth server msgs:
-
-// Message containing a nonce from auth-server.
-type NonceMessage struct {
-	Nonce string
-	N     int64 // PoW difficulty: number of zeroes expected at end of md5(nonce+secret)
-}
+var unconfirmedOperations []OperationRecord
 
 /*
 func (t *Miner) GetChainTips(args *Args, quo *Quotient) error {
@@ -96,7 +101,7 @@ func (t *Miner) GetChainTips(args *Args, quo *Quotient) error {
 */
 
 // validateBlock returns true if the given block is valid, false otherwise
-func validateBlock(block *Block) bool {
+func validateBlock(block AbstractBlock) bool {
 	// Block validations
 	// Check that the nonce for the block is valid: PoW is correct and has the right difficulty.
 	// Check that the previous block hash points to a legal, previously generated, block.
@@ -111,7 +116,7 @@ func validateBlock(block *Block) bool {
 	return true
 }
 
-// Returns the MD5 hash as a hex string for the (nonce + secret) value.
+// computeNonceSecretHash returns the MD5 hash as a hex string for the (nonce + secret) value.
 func computeNonceSecretHash(nonce string, secret string) string {
 	h := md5.New()
 	h.Write([]byte(nonce + secret))
@@ -121,10 +126,20 @@ func computeNonceSecretHash(nonce string, secret string) string {
 
 // SubmitBlock is an RPC call invoked by other Miner instances
 // it would validate the given block and accept it if it is valid
-func (t *Miner) SubmitBlock(block *Block, status *bool) error {
-	if validateBlock(block) == false {
+func (mapi *MinerAPI) SubmitBlock(blockPacket *ActualBlock, status *bool) error {
+	if validateBlock(blockPacket) == false {
 		*status = false
 		return nil
+	}
+	switch t := blockPacket.Block.(type) {
+	default:
+		return errors.New("Invalid Block Type")
+	case OPBlock:
+		fmt.Println("Got OPBlock") // t has type OPBlock
+	case NOPBlock:
+		fmt.Println("Got NOPBlock") // t has type NOPBlock
+	case GenesisBlock:
+		fmt.Println("Got GenesisBlock") // t has type GenesisBlock
 	}
 	// quo.Quo = args.A / args.B
 	// quo.Rem = args.A % args.B
@@ -132,21 +147,67 @@ func (t *Miner) SubmitBlock(block *Block, status *bool) error {
 	return nil
 }
 
-func computeNOPBlock() error {
-	return nil
+func (m *Miner) computeNOPBlock() (NOPBlock, error) {
+	minerID := ""
+	prevHash := ""
+	var nounce uint32
+	nounce = 1
+	nopBlock := NOPBlock{prevHash, nounce}
+	return nopBlock, nil
 }
 
 func computeOPBlock() error {
 	return nil
 }
 
-func initializeBlockChain(genesisBlockHash string, peerMinersAddrs []string) error {
+func broadcastBlock(block ActualBlock, peerMinersAddrs []string) {
+	for _, addr := range peerMinersAddrs {
+		// go
+		client, err := rpc.DialHTTP("tcp", addr)
+		if err != nil {
+			log.Fatal("dialing:", err)
+		}
+		// Then it can make a remote call:
 
+		// Synchronous call
+		args := &block
+		var reply bool
+		err = client.Call("MinerAPI.SubmitBlock", args, &reply)
+		if err != nil {
+			log.Fatal("SubmitBlock error:", err)
+		}
+		fmt.Println("SubmitBlock successed:", reply)
+	}
+
+}
+
+func initializeBlockChain(genesisBlockHash string, peerMinersAddrs []string) error {
+	genesisBlock := GenesisBlock{genesisBlockHash}
+
+	// broadcastBlock(genesisBlock, peerMinersAddrs)
+	return nil
 }
 
 // Main workhorse method.
 func main() {
-	// TODO
+	// Register
+	minerAPI := new(MinerAPI)
+	rpc.Register(minerAPI)
+	rpc.HandleHTTP()
+	l, e := net.Listen("tcp", minerAPI.IncomingMinersAddr)
+	if e != nil {
+		log.Fatal("listen error:", e)
+	}
+	go http.Serve(l, nil)
+
+	clientAPI := new(ClientAPI)
+	rpc.Register(clientAPI)
+	rpc.HandleHTTP()
+	l, e = net.Listen("tcp", clientAPI.IncomingClientsAddr)
+	if e != nil {
+		log.Fatal("listen error:", e)
+	}
+	go http.Serve(l, nil)
 
 	// Use json.Marshal json.Unmarshal for encoding/decoding to servers
 
