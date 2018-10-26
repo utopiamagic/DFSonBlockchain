@@ -15,6 +15,7 @@ import (
 	"crypto/md5"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"net"
@@ -26,32 +27,46 @@ import (
 	// TODO
 )
 
-// AbstractBlock is the interface of GenesisBlock, NOPBlock and OPBlock
-type AbstractBlock interface {
-}
-
-// ActualBlock is the "base class" of GenesisBlock, NOPBlock and OPBlock
-type ActualBlock struct {
-	Block   AbstractBlock
-	MinerID string // The identifier of the miner that computed this block (block-minerID)
+// Block is the interface for GenesisBlock, NOPBlock and OPBlock
+type Block interface {
+	hash() string
 }
 
 // GenesisBlock is the first block in this blockchain
 type GenesisBlock struct {
-	Hash string // The genesis (first) block MD5 hash for this blockchain
+	Hash    string // The genesis (first) block MD5 hash for this blockchain
+	MinerID string // The identifier of the miner that computed this block (block-minerID)
+}
+
+func (gblock GenesisBlock) hash() string {
+	return gblock.Hash
 }
 
 // NOPBlock is a No-OP Block
 type NOPBlock struct {
 	PrevHash string // A hash of the previous block in the chain (prev-hash)
+	MinerID  string // The identifier of the miner that computed this block (block-minerID)
 	Nonce    uint32 // A 32-bit unsigned integer nonce (nonce)
+}
+
+func (nopblock NOPBlock) hash() string {
+	h := md5.New()
+	h.Write([]byte(fmt.Sprintf("%v", nopblock)))
+	return hex.EncodeToString(h.Sum(nil))
 }
 
 // OPBlock is a OP Block with non-empty Records
 type OPBlock struct {
 	PrevHash string            // A hash of the previous block in the chain (prev-hash)
 	Records  []OperationRecord // An ordered set of operation records
+	MinerID  string            // The identifier of the miner that computed this block (block-minerID)
 	Nonce    uint32            // A 32-bit unsigned integer nonce (nonce)
+}
+
+func (opblock OPBlock) hash() string {
+	h := md5.New()
+	h.Write([]byte(fmt.Sprintf("%v", opblock)))
+	return hex.EncodeToString(h.Sum(nil))
 }
 
 // OperationRecord is a file operation on the block chain
@@ -133,43 +148,73 @@ type MinerAPI struct {
 	IncomingMinersAddr string   // The local IP:port where the miner should expect other miners to connect to it (address it should listen on for connections from miners)
 }
 
-var chain map[string]OPBlock
+var chain map[string]Block
 var unconfirmedOperations []OperationRecord
+var chainTips []Block
+var miner Miner
 
-/*
-func (t *Miner) GetChainTips(args *Args, quo *Quotient) error {
+// GetChainTips provides the active starting point of the current blockchain
+// parameter arg is optional and not being used at all
+func (mapi *MinerAPI) GetChainTips(arg interface{}, reply *[]Block) error {
+	*reply = chainTips
 	return nil
 }
-*/
 
 // validateBlock returns true if the given block is valid, false otherwise
-func validateBlock(block AbstractBlock) bool {
+func (m *Miner) validateBlock(block Block) error {
 	// Block validations
-	// Check that the nonce for the block is valid: PoW is correct and has the right difficulty.
-	// Check that the previous block hash points to a legal, previously generated, block.
+	switch t := block.(type) {
+	default:
+		return errors.New("Invalid Block Type")
+	case OPBlock:
+		if validateNonce(t, m.PowPerOpBlock) == false {
+			return errors.New("The given OPBlock does not have the right difficulty")
+		}
+		// Check that the previous block hash points to a legal, previously generated, block.
+		if val, ok := chain[t.PrevHash]; !ok {
+			return errors.New("The given OPBlock does not have a previous block")
+		}
 
-	// Operation validations:
-	// Check that each operation in the block is associated with a miner ID that has enough record coins to pay for the operation
-	// (i.e., the number of record coins associated with the minerID must have sufficient balance to 'pay' for the operation).
+		// Operation validations:
+		// Check that each operation in the block is associated with a miner ID that has enough record coins to pay for the operation
+		// (i.e., the number of record coins associated with the minerID must have sufficient balance to 'pay' for the operation).
 
-	// Check that each operation does not violate RFS semantics
-	// (e.g., a record is not mutated or inserted into the middled of an rfs file).
+		// Check that each operation does not violate RFS semantics
+		// (e.g., a record is not mutated or inserted into the middled of an rfs file).
 
-	return true
+		chain[t.hash()] = t
+		break
+	case NOPBlock:
+		if validateNonce(t, m.PowPerNoOpBlock) == false {
+			return errors.New("The given NOPBlock does not have the right difficulty")
+		}
+		// Check that the previous block hash points to a legal, previously generated, block.
+		if val, ok := chain[t.PrevHash]; ok {
+			chain[t.hash()] = t
+		} else {
+			return errors.New("The given NOPBlock does not have a previous block")
+		}
+		break
+	case GenesisBlock:
+		if chain == nil || len(chain) == 0 {
+			return nil
+		} else {
+			return errors.New("A GenesisBlock already existed")
+		}
+	}
+	return nil
 }
 
-// computeNonceSecretHash returns the MD5 hash as a hex string for the (nonce + secret) value.
-func computeNonceSecretHash(nonce string, secret string) string {
-	h := md5.New()
-	h.Write([]byte(nonce + secret))
-	str := hex.EncodeToString(h.Sum(nil))
-	return str
+// SubmitRecord is an RPC call invoked by the RFS Client
+// it submits operationRecord to the miner network if the coins mined are sufficient to perform the operation
+func (capi *ClientAPI) SubmitRecord(operationRecord *OperationRecord, status *bool) error {
+	return nil
 }
 
 // SubmitBlock is an RPC call invoked by other Miner instances
-// it would validate the given block and accept it if it is valid
-func (mapi *MinerAPI) SubmitBlock(blockPacket *ActualBlock, status *bool) error {
-	if validateBlock(blockPacket) == false {
+// it accepts the given block upon successful validation
+func (mapi *MinerAPI) SubmitBlock(block Block, status *bool) error {
+	if miner.validateBlock(block) == nil {
 		*status = false
 		return nil
 	}
@@ -189,20 +234,61 @@ func (mapi *MinerAPI) SubmitBlock(blockPacket *ActualBlock, status *bool) error 
 	return nil
 }
 
-func (m *Miner) computeNOPBlock() (NOPBlock, error) {
-	// minerID := ""
-	prevHash := ""
-	var nounce uint32
-	nounce = 1
-	nopBlock := NOPBlock{prevHash, nounce}
-	return nopBlock, nil
+func countTrailingZeros(str string) uint8 {
+	var reverseCounter uint8
+	for i := len(str) - 1; i >= 0; i-- {
+		if str[i] == 0 {
+			reverseCounter++
+		} else {
+			break
+		}
+	}
+	return reverseCounter
 }
 
-func computeOPBlock() error {
+// validateNonce computes the MD5 hash as a hex string for the block
+// and checks if it has sufficient trailing zeros
+func validateNonce(block Block, difficulty uint8) bool {
+	h := md5.New()
+	h.Write([]byte(fmt.Sprintf("%v", block)))
+	combinedHash := hex.EncodeToString(h.Sum(nil))
+	if countTrailingZeros(combinedHash) >= difficulty {
+		return true
+	}
+	return false
+}
+
+func (m *Miner) findBlockFromLongestChain() Block {
 	return nil
 }
 
-func broadcastBlock(block ActualBlock, peerMinersAddrs []string) {
+func (m *Miner) computeNOPBlock() (NOPBlock, error) {
+	var nonce uint32
+	prevHash := m.findBlockFromLongestChain().hash()
+	nopBlock := NOPBlock{prevHash, m.MinerID, nonce}
+	for nonce = 1; ; nonce++ {
+		nopBlock = NOPBlock{prevHash, m.MinerID, nonce}
+		if validateNonce(nopBlock, m.PowPerNoOpBlock) == true {
+			break
+		}
+	}
+	return nopBlock, nil
+}
+
+func (m *Miner) computeOPBlock(records []OperationRecord) (OPBlock, error) {
+	var nonce uint32
+	prevHash := m.findBlockFromLongestChain().hash()
+	opBlock := OPBlock{}
+	for nonce = 1; ; nonce++ {
+		opBlock = OPBlock{prevHash, records, m.MinerID, nonce}
+		if validateNonce(opBlock, m.PowPerOpBlock) == true {
+			break
+		}
+	}
+	return opBlock, nil
+}
+
+func broadcastBlock(block Block, peerMinersAddrs []string) {
 	for _, addr := range peerMinersAddrs {
 		// go
 		client, err := rpc.DialHTTP("tcp", addr)
