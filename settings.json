@@ -1,0 +1,16 @@
+{
+    "MinedCoinsPerOpBlock": 8,
+    "MinedCoinsPerNoOpBlock": 4,
+    "NumCoinsPerFileCreate": 4,
+    "GenOpBlockTimeout": 5,
+    "GenesisBlockHash": "83218ac34c1834c26781fe4bde918ee4",
+    "PowPerOpBlock": 4,
+    "PowPerNoOpBlock": 4,
+    "ConfirmsPerFileCreate": 2,
+    "ConfirmsPerFileAppend": 4,
+    "MinerID": "Mijnwerker",
+    "PeerMinersAddrs": ["127.0.0.1:5050", "127.0.0.1:6060", "127.0.0.1:7070"],
+    "IncomingMinersAddr": "127.0.0.1:8080",
+    "OutgoingMinersIP": "127.0.0.1",
+    "IncomingClientsAddr": "127.0.0.1:9090"
+}
