@@ -148,14 +148,20 @@ type MinerAPI struct {
 	IncomingMinersAddr string   // The local IP:port where the miner should expect other miners to connect to it (address it should listen on for connections from miners)
 }
 
+// ChainTip is ...
+type ChainTip struct {
+	length int
+	Block
+}
+
 var chain map[string]Block
 var unconfirmedOperations []OperationRecord
-var chainTips []Block
+var chainTips []ChainTip
 var miner Miner
 
 // GetChainTips provides the active starting point of the current blockchain
 // parameter arg is optional and not being used at all
-func (mapi *MinerAPI) GetChainTips(arg interface{}, reply *[]Block) error {
+func (mapi *MinerAPI) GetChainTips(arg interface{}, reply *[]ChainTip) error {
 	*reply = chainTips
 	return nil
 }
@@ -190,6 +196,7 @@ func (m *Miner) validateBlock(block Block) error {
 		}
 		// Check that the previous block hash points to a legal, previously generated, block.
 		if val, ok := chain[t.PrevHash]; ok {
+			fmt.Println("NOPBlock: the previous block is:", val.hash())
 			chain[t.hash()] = t
 		} else {
 			return errors.New("The given NOPBlock does not have a previous block")
@@ -214,24 +221,13 @@ func (capi *ClientAPI) SubmitRecord(operationRecord *OperationRecord, status *bo
 // SubmitBlock is an RPC call invoked by other Miner instances
 // it accepts the given block upon successful validation
 func (mapi *MinerAPI) SubmitBlock(block Block, status *bool) error {
-	if miner.validateBlock(block) == nil {
-		*status = false
+	if err := miner.validateBlock(block); err == nil {
+		*status = true
+		// broadcastBlock(genesisBlock, peerMinersAddrs)
 		return nil
+	} else {
+		return err
 	}
-	// switch t := blockPacket.Block.(type) {
-	// default:
-	// 	return errors.New("Invalid Block Type")
-	// case OPBlock:
-	// 	fmt.Println("Got OPBlock") // t has type OPBlock
-	// case NOPBlock:
-	// 	fmt.Println("Got NOPBlock") // t has type NOPBlock
-	// case GenesisBlock:
-	// 	fmt.Println("Got GenesisBlock") // t has type GenesisBlock
-	// }
-	// quo.Quo = args.A / args.B
-	// quo.Rem = args.A % args.B
-	*status = true
-	return nil
 }
 
 func countTrailingZeros(str string) uint8 {
@@ -259,33 +255,54 @@ func validateNonce(block Block, difficulty uint8) bool {
 }
 
 func (m *Miner) findBlockFromLongestChain() Block {
+
+	for _, v := range chainTips {
+
+	}
 	return nil
 }
 
-func (m *Miner) computeNOPBlock() (NOPBlock, error) {
+// computeNOPBlock tries to construct a NOPBlock when it is not requested to stop
+// when requested to stop it generates an error and sends an invalid NOPBlock
+func (m *Miner) computeNOPBlock(quit <-chan bool) (NOPBlock, error) {
 	var nonce uint32
+	nonce = 1
 	prevHash := m.findBlockFromLongestChain().hash()
 	nopBlock := NOPBlock{prevHash, m.MinerID, nonce}
-	for nonce = 1; ; nonce++ {
-		nopBlock = NOPBlock{prevHash, m.MinerID, nonce}
-		if validateNonce(nopBlock, m.PowPerNoOpBlock) == true {
+	for {
+		select {
+		default:
+			nopBlock = NOPBlock{prevHash, m.MinerID, nonce}
+			if validateNonce(nopBlock, m.PowPerNoOpBlock) == true {
+				return nopBlock, nil
+			}
+			nonce++
 			break
+		case <-quit:
+			return nopBlock, errors.New("computeNOPBlock has been requested to quit")
 		}
 	}
-	return nopBlock, nil
 }
 
-func (m *Miner) computeOPBlock(records []OperationRecord) (OPBlock, error) {
+// computeOPBlock works similarly except it takes all the records collected in the given time
+func (m *Miner) computeOPBlock(quit <-chan bool, records []OperationRecord) (OPBlock, error) {
 	var nonce uint32
+	nonce = 1
 	prevHash := m.findBlockFromLongestChain().hash()
-	opBlock := OPBlock{}
-	for nonce = 1; ; nonce++ {
-		opBlock = OPBlock{prevHash, records, m.MinerID, nonce}
-		if validateNonce(opBlock, m.PowPerOpBlock) == true {
+	opBlock := OPBlock{prevHash, records, m.MinerID, nonce}
+	for {
+		select {
+		default:
+			opBlock = OPBlock{prevHash, records, m.MinerID, nonce}
+			if validateNonce(opBlock, m.PowPerOpBlock) == true {
+				return opBlock, nil
+			}
+			nonce++
 			break
+		case <-quit:
+			return opBlock, errors.New("computeOPBlock has been requested to quit")
 		}
 	}
-	return opBlock, nil
 }
 
 func broadcastBlock(block Block, peerMinersAddrs []string) {
@@ -293,10 +310,13 @@ func broadcastBlock(block Block, peerMinersAddrs []string) {
 		// go
 		client, err := rpc.DialHTTP("tcp", addr)
 		if err != nil {
-			log.Fatal("dialing:", err)
+			log.Fatal("dialing:", addr, err)
+			continue
 		}
-		// Then it can make a remote call:
-
+		// Then it can make a remote asynchronous call
+		reply := new(bool)
+		submitBlockCall := client.Go("MinerAPI.SubmitBlock", block, reply, nil)
+		replyCall := <-submitBlockCall.Done // will be equal to divCall
 		// Synchronous call
 		args := &block
 		var reply bool
@@ -309,8 +329,8 @@ func broadcastBlock(block Block, peerMinersAddrs []string) {
 
 }
 
-func initializeBlockChain(genesisBlockHash string, peerMinersAddrs []string) error {
-	// genesisBlock := GenesisBlock{genesisBlockHash}
+func (m *Miner) initializeBlockChain(genesisBlockHash string, peerMinersAddrs []string) error {
+	genesisBlock := GenesisBlock{genesisBlockHash, m.MinerID}
 
 	// broadcastBlock(genesisBlock, peerMinersAddrs)
 	return nil
