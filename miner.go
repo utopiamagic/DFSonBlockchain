@@ -22,6 +22,7 @@ import (
 	"net/http"
 	"net/rpc"
 	"os"
+	"time"
 
 	"github.ugrad.cs.ubc.ca/CPSC416-2018W-T1/P1-i8b0b-e8y0b/rfslib"
 	// TODO
@@ -80,6 +81,10 @@ type OperationRecord struct {
 // Miner mines blocks.
 type Miner struct {
 	Settings
+
+	GeneratedBlocksChan chan Block  // Channel of generated blocks
+	OPBlockStopChan     chan string // Channel that stops computeOPBlock
+	NOPBlockStopChan    chan string // Channel that stops computeNOPBlock
 }
 
 // Settings contains all miner settings and is loaded through
@@ -204,11 +209,13 @@ func (m *Miner) validateBlock(block Block) error {
 		break
 	case GenesisBlock:
 		if chain == nil || len(chain) == 0 {
-			return nil
+			break
 		} else {
 			return errors.New("A GenesisBlock already existed")
 		}
 	}
+	// stop computeNOPBlock and computeNOPBlock
+	// quitMining <- true
 	return nil
 }
 
@@ -221,13 +228,13 @@ func (capi *ClientAPI) SubmitRecord(operationRecord *OperationRecord, status *bo
 // SubmitBlock is an RPC call invoked by other Miner instances
 // it accepts the given block upon successful validation
 func (mapi *MinerAPI) SubmitBlock(block Block, status *bool) error {
-	if err := miner.validateBlock(block); err == nil {
+	err := miner.validateBlock(block)
+	if err == nil {
 		*status = true
-		// broadcastBlock(genesisBlock, peerMinersAddrs)
+		// miner.broadcastBlock(genesisBlock)
 		return nil
-	} else {
-		return err
 	}
+	return err
 }
 
 func countTrailingZeros(str string) uint8 {
@@ -255,16 +262,16 @@ func validateNonce(block Block, difficulty uint8) bool {
 }
 
 func (m *Miner) findBlockFromLongestChain() Block {
+	/*
+		for _, v := range chainTips {
 
-	for _, v := range chainTips {
-
-	}
+		}
+	*/
 	return nil
 }
 
 // computeNOPBlock tries to construct a NOPBlock when it is not requested to stop
-// when requested to stop it generates an error and sends an invalid NOPBlock
-func (m *Miner) computeNOPBlock(quit <-chan bool) (NOPBlock, error) {
+func (m *Miner) computeNOPBlock() {
 	var nonce uint32
 	nonce = 1
 	prevHash := m.findBlockFromLongestChain().hash()
@@ -274,18 +281,18 @@ func (m *Miner) computeNOPBlock(quit <-chan bool) (NOPBlock, error) {
 		default:
 			nopBlock = NOPBlock{prevHash, m.MinerID, nonce}
 			if validateNonce(nopBlock, m.PowPerNoOpBlock) == true {
-				return nopBlock, nil
+				m.GeneratedBlocksChan <- nopBlock
 			}
 			nonce++
-			break
-		case <-quit:
-			return nopBlock, errors.New("computeNOPBlock has been requested to quit")
+		case processName := <-m.NOPBlockStopChan:
+			log.Println("computeNOPBlock has been requested to quit by " + processName)
+			return
 		}
 	}
 }
 
 // computeOPBlock works similarly except it takes all the records collected in the given time
-func (m *Miner) computeOPBlock(quit <-chan bool, records []OperationRecord) (OPBlock, error) {
+func (m *Miner) computeOPBlock(records []OperationRecord) {
 	var nonce uint32
 	nonce = 1
 	prevHash := m.findBlockFromLongestChain().hash()
@@ -295,18 +302,58 @@ func (m *Miner) computeOPBlock(quit <-chan bool, records []OperationRecord) (OPB
 		default:
 			opBlock = OPBlock{prevHash, records, m.MinerID, nonce}
 			if validateNonce(opBlock, m.PowPerOpBlock) == true {
-				return opBlock, nil
+				m.GeneratedBlocksChan <- opBlock
 			}
 			nonce++
-			break
-		case <-quit:
-			return opBlock, errors.New("computeOPBlock has been requested to quit")
+		case processName := <-m.OPBlockStopChan:
+			log.Println("computeOPBlock has been requested to quit by " + processName)
+			return
 		}
 	}
 }
 
-func broadcastBlock(block Block, peerMinersAddrs []string) {
-	for _, addr := range peerMinersAddrs {
+// generateBlocks should only be called once
+func (m *Miner) generateBlocks() {
+	opBlockTimer := time.NewTimer(0 * time.Millisecond)
+	m.OPBlockStopChan = make(chan string)
+	m.NOPBlockStopChan = make(chan string)
+	m.GeneratedBlocksChan = make(chan Block)
+	operationRecordChan := make(chan OperationRecord)
+	var records []OperationRecord
+	generatingNOPBlock := false
+	for {
+		select {
+		default:
+			if !generatingNOPBlock {
+				go m.computeNOPBlock()
+				generatingNOPBlock = true
+			}
+		case generatedBlock := <-m.GeneratedBlocksChan:
+			switch generatedBlock.(type) {
+			case NOPBlock:
+				generatingNOPBlock = false
+				log.Println("Received the generated NOPBlock")
+			case OPBlock:
+				log.Println("Received the generated OPBlock")
+			default:
+				log.Println("Received the generated block of some other type")
+				break
+			}
+			go m.broadcastBlock(generatedBlock)
+		case operationRecord := <-operationRecordChan:
+			if opBlockTimer.Stop() {
+				opBlockTimer.Reset(time.Duration(m.GenOpBlockTimeout) * time.Millisecond)
+				m.NOPBlockStopChan <- "generateBlocks()"
+			}
+			records = append(records, operationRecord)
+		case <-opBlockTimer.C:
+			go m.computeOPBlock(records)
+		}
+	}
+}
+
+func (m *Miner) broadcastBlock(block Block) {
+	for _, addr := range m.PeerMinersAddrs {
 		// go
 		client, err := rpc.DialHTTP("tcp", addr)
 		if err != nil {
@@ -319,7 +366,6 @@ func broadcastBlock(block Block, peerMinersAddrs []string) {
 		replyCall := <-submitBlockCall.Done // will be equal to divCall
 		// Synchronous call
 		args := &block
-		var reply bool
 		err = client.Call("MinerAPI.SubmitBlock", args, &reply)
 		if err != nil {
 			log.Fatal("SubmitBlock error:", err)
