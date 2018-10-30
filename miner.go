@@ -19,13 +19,14 @@ import (
 	"fmt"
 	"log"
 	"net"
-	"net/http"
 	"net/rpc"
 	"os"
 	"time"
 
+	"github.com/DistributedClocks/GoVector/govec"
+	"github.com/DistributedClocks/GoVector/govec/vrpc"
+
 	"github.ugrad.cs.ubc.ca/CPSC416-2018W-T1/P1-i8b0b-e8y0b/rfslib"
-	// TODO
 )
 
 // Block is the interface for GenesisBlock, NOPBlock and OPBlock
@@ -111,13 +112,14 @@ type OperationRecord struct {
 type Miner struct {
 	Settings
 
-	chain                 map[string]Block
-	unconfirmedOperations []OperationRecord
-	chainTips             []ChainTip
-	Balance               uint32      // The current balance of the miner
-	GeneratedBlocksChan   chan Block  // Channel of generated blocks
-	OPBlockStopChan       chan string // Channel that stops computeOPBlock
-	NOPBlockStopChan      chan string // Channel that stops computeNOPBlock
+	chain                 map[string]Block  // All the blocks in the network
+	unconfirmedOperations []OperationRecord // Unconfirmed operations from the miner's clients
+	chainTips             []ChainTip        // The collection of the head of all valid forks
+	Logger                *govec.GoLog      // The GoVector Logger
+	Balance               uint32            // The current balance of the miner
+	GeneratedBlocksChan   chan Block        // Channel of generated blocks
+	OPBlockStopChan       chan string       // Channel that stops computeOPBlock
+	NOPBlockStopChan      chan string       // Channel that stops computeNOPBlock
 }
 
 // Settings contains all miner settings and is loaded through
@@ -265,6 +267,18 @@ func (capi *ClientAPI) SubmitRecord(operationRecord *OperationRecord, status *bo
 	return nil
 }
 
+// ConfirmOperation RPC should be invoked by the RFS Client
+// upon confimation it sets status to true
+func (capi *ClientAPI) ConfirmOperation(operationRecord *OperationRecord, status *bool) error {
+	if operationRecord.OperationType == "append" {
+
+	} else if operationRecord.OperationType == "create" {
+
+	}
+	*status = false
+	return errors.New("OperationType cannot be recognized")
+}
+
 // GetBalance RPC call should be invoked by the RFS Client and does not take an input
 // it returns the current balance of the longest chain of the miner being quried
 func (capi *ClientAPI) GetBalance(whatever interface{}, currentBalance *uint32) error {
@@ -298,8 +312,8 @@ func (m *Miner) requestPreviousBlocks(block Block) error {
 	for ; !exists; prevHash = prevBlock.prevHash() {
 		prevBlock, exists = m.chain[prevHash]
 		for _, addr := range m.PeerMinersAddrs {
-			// go
-			client, err := rpc.DialHTTP("tcp", addr)
+			options := govec.GetDefaultLogOptions()
+			client, err := vrpc.RPCDial("tcp", addr, m.Logger, options)
 			if err != nil {
 				log.Fatal("dialing:", addr, err)
 				continue
@@ -548,8 +562,8 @@ func (m *Miner) broadcastBlock(block Block) error {
 	var calls []*rpc.Call
 	var errStrings []string
 	for _, addr := range m.PeerMinersAddrs {
-		// go
-		client, err := rpc.DialHTTP("tcp", addr)
+		options := govec.GetDefaultLogOptions()
+		client, err := vrpc.RPCDial("tcp", addr, miner.Logger, options)
 		if err != nil {
 			log.Fatal("dialing:", addr, err)
 			continue
@@ -623,25 +637,36 @@ func main() {
 	if err != nil {
 		log.Fatalln(err)
 	}
-	fmt.Println("settings", settings)
+	fmt.Println("Loaded settings", settings)
+
+	fmt.Println("Starting miner server")
 
 	// Register RPC methods for other miners to call.
 	minerAPI := new(MinerAPI)
-	rpc.Register(minerAPI)
-	rpc.HandleHTTP()
+	minerServer := rpc.NewServer()
+	minerServer.Register(minerAPI)
 	l, e := net.Listen("tcp", minerAPI.IncomingMinersAddr)
 	if e != nil {
 		log.Fatal("listen error:", e)
 	}
-	go http.Serve(l, nil)
+
+	//Initalize GoVector
+	options := govec.GetDefaultLogOptions()
+	//Access config and set timestamps (realtime) to true
+	config := govec.GetDefaultConfig()
+	config.UseTimestamps = true
+	logger := govec.InitGoVector("MinerProcess", "MinerLog", config)
+	miner.Logger = logger
+	go vrpc.ServeRPCConn(minerServer, l, logger, options)
 
 	// Register RPC methods for clients to call.
 	clientAPI := new(ClientAPI)
-	rpc.Register(clientAPI)
-	rpc.HandleHTTP()
+	clientServer := rpc.NewServer()
+	clientServer.Register(clientAPI)
 	l, e = net.Listen("tcp", clientAPI.IncomingClientsAddr)
 	if e != nil {
 		log.Fatal("listen error:", e)
 	}
-	go http.Serve(l, nil)
+	// we will block here to serve our clients
+	vrpc.ServeRPCConn(clientServer, l, logger, options)
 }
