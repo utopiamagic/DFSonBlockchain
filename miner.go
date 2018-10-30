@@ -1,5 +1,5 @@
 /*
-Implements the solution to assignment 1 for UBC CS 416 2017 W2.
+Implements a miner network
 
 Usage:
 $ go run client.go [local UDP ip:port] [local TCP ip:port] [aserver UDP ip:port]
@@ -31,6 +31,8 @@ import (
 // Block is the interface for GenesisBlock, NOPBlock and OPBlock
 type Block interface {
 	hash() string
+	prevHash() string
+	minerID() string
 	// getHeight() (uint32, error)
 }
 
@@ -44,11 +46,20 @@ func (gblock GenesisBlock) hash() string {
 	return gblock.Hash
 }
 
+func (gblock GenesisBlock) prevHash() string {
+	return gblock.Hash
+}
+
+func (gblock GenesisBlock) minerID() string {
+	return gblock.MinerID
+}
+
 // NOPBlock is a No-OP Block
 type NOPBlock struct {
-	PrevHash string // A hash of the previous block in the chain (prev-hash)
-	MinerID  string // The identifier of the miner that computed this block (block-minerID)
-	Nonce    uint32 // A 32-bit unsigned integer nonce (nonce)
+	PrevHash     string // A hash of the previous block in the chain (prev-hash)
+	Nonce        uint32 // A 32-bit unsigned integer nonce (nonce)
+	MinerID      string // The identifier of the miner that computed this block (block-minerID)
+	MinerBalance uint32 // The updated balance of the miner that computed this block
 }
 
 func (nopblock NOPBlock) hash() string {
@@ -57,18 +68,35 @@ func (nopblock NOPBlock) hash() string {
 	return hex.EncodeToString(h.Sum(nil))
 }
 
+func (nopblock NOPBlock) prevHash() string {
+	return nopblock.PrevHash
+}
+
+func (nopblock NOPBlock) minerID() string {
+	return nopblock.MinerID
+}
+
 // OPBlock is a OP Block with non-empty Records
 type OPBlock struct {
-	PrevHash string            // A hash of the previous block in the chain (prev-hash)
-	Records  []OperationRecord // An ordered set of operation records
-	MinerID  string            // The identifier of the miner that computed this block (block-minerID)
-	Nonce    uint32            // A 32-bit unsigned integer nonce (nonce)
+	PrevHash     string            // A hash of the previous block in the chain (prev-hash)
+	Records      []OperationRecord // An ordered set of operation records
+	Nonce        uint32            // A 32-bit unsigned integer nonce (nonce)
+	MinerID      string            // The identifier of the miner that computed this block (block-minerID)
+	MinerBalance uint32            // The updated balance of the miner that computed this block
 }
 
 func (opblock OPBlock) hash() string {
 	h := md5.New()
 	h.Write([]byte(fmt.Sprintf("%v", opblock)))
 	return hex.EncodeToString(h.Sum(nil))
+}
+
+func (opblock OPBlock) prevHash() string {
+	return opblock.PrevHash
+}
+
+func (opblock OPBlock) minerID() string {
+	return opblock.MinerID
 }
 
 // OperationRecord is a file operation on the block chain
@@ -83,9 +111,13 @@ type OperationRecord struct {
 type Miner struct {
 	Settings
 
-	GeneratedBlocksChan chan Block  // Channel of generated blocks
-	OPBlockStopChan     chan string // Channel that stops computeOPBlock
-	NOPBlockStopChan    chan string // Channel that stops computeNOPBlock
+	chain                 map[string]Block
+	unconfirmedOperations []OperationRecord
+	chainTips             []ChainTip
+	Balance               uint32      // The current balance of the miner
+	GeneratedBlocksChan   chan Block  // Channel of generated blocks
+	OPBlockStopChan       chan string // Channel that stops computeOPBlock
+	NOPBlockStopChan      chan string // Channel that stops computeNOPBlock
 }
 
 // Settings contains all miner settings and is loaded through
@@ -160,21 +192,18 @@ type ChainTip struct {
 	Block
 }
 
-var chain map[string]Block
-var unconfirmedOperations []OperationRecord
-var chainTips []ChainTip
 var miner Miner
 
 // GetChainTips RPC provides the active starting point of the current blockchain
 // parameter arg is optional and not being used at all
 func (mapi *MinerAPI) GetChainTips(arg interface{}, reply *[]ChainTip) error {
-	*reply = chainTips
+	*reply = miner.chainTips
 	return nil
 }
 
 // GetBlock RPC gets a block with a particular header hash from the local blockchain map
 func (mapi *MinerAPI) GetBlock(headerHash string, reply *Block) error {
-	block, exists := chain[headerHash]
+	block, exists := miner.chain[headerHash]
 	if exists {
 		*reply = block
 		return nil
@@ -193,7 +222,7 @@ func (m *Miner) validateBlock(block Block) error {
 			return errors.New("The given OPBlock does not have the right difficulty")
 		}
 		// Check that the previous block hash points to a legal, previously generated, block.
-		if val, ok := chain[t.PrevHash]; !ok {
+		if val, ok := m.chain[t.PrevHash]; !ok {
 			return errors.New("The given OPBlock does not have a previous block")
 		}
 
@@ -204,22 +233,22 @@ func (m *Miner) validateBlock(block Block) error {
 		// Check that each operation does not violate RFS semantics
 		// (e.g., a record is not mutated or inserted into the middled of an rfs file).
 
-		chain[t.hash()] = t
+		m.chain[t.hash()] = t
 		break
 	case NOPBlock:
 		if validateNonce(t, m.PowPerNoOpBlock) == false {
 			return errors.New("The given NOPBlock does not have the right difficulty")
 		}
 		// Check that the previous block hash points to a legal, previously generated, block.
-		if val, ok := chain[t.PrevHash]; ok {
-			fmt.Println("NOPBlock: the previous block is:", val.hash())
-			chain[t.hash()] = t
+		if val, ok := m.chain[t.PrevHash]; ok {
+			fmt.Println("NOPBlock: the previous block is:", t.prevHash())
+			m.chain[t.hash()] = t
 		} else {
 			return errors.New("The given NOPBlock does not have a previous block")
 		}
 		break
 	case GenesisBlock:
-		if chain == nil || len(chain) == 0 {
+		if m.chain == nil || len(m.chain) == 0 {
 			break
 		} else {
 			return errors.New("A GenesisBlock already existed")
@@ -236,33 +265,38 @@ func (capi *ClientAPI) SubmitRecord(operationRecord *OperationRecord, status *bo
 	return nil
 }
 
+// GetBalance RPC call should be invoked by the RFS Client and does not take an input
+// it returns the current balance of the longest chain of the miner being quried
+func (capi *ClientAPI) GetBalance(whatever interface{}, currentBalance *uint32) error {
+	bestChainTip := miner.getBlockFromLongestChain()
+	var err error
+	*currentBalance, err = miner.getBalance(bestChainTip, miner.MinerID)
+	return err
+}
+
 // getHeight returns the height of the given block in the local chain
 func (m *Miner) getHeight(block Block) (int, error) {
-	switch block.(type) {
-	default:
-		return 0, errors.New("Encountered a block of unknown type")
-	case OPBlock:
-	case NOPBlock:
-		prevBlock, exists := chain[block.hash()]
-		if exists {
-			prevHeight, err := m.getHeight(prevBlock)
-			if err == nil {
-				return prevHeight + 1, nil
-			}
-			return prevHeight, err
-		}
-		return 1, errors.New("The given NOPBlock/OPBlock is an orphant block")
-	case GenesisBlock:
+	if block.hash() == block.prevHash() {
+		// GenesisBlock case
 		return 1, nil
 	}
-	return 0, errors.New("this will never be reached")
+	// OPBlock, NOPBlock case
+	prevBlock, exists := m.chain[block.hash()]
+	if exists {
+		prevHeight, err := m.getHeight(prevBlock)
+		if err == nil {
+			return prevHeight + 1, nil
+		}
+		return prevHeight, err
+	}
+	return 1, errors.New("The given NOPBlock/OPBlock starts with an orphant block:" + block.hash())
 }
 
 func (m *Miner) requestPreviousBlocks(block Block) error {
-	prevHash := block.hash()
-	prevBlock, exists := chain[prevHash]
-	for ; !exists; prevHash = prevBlock.hash() {
-		prevBlock, exists = chain[prevHash]
+	prevHash := block.prevHash()
+	prevBlock, exists := m.chain[prevHash]
+	for ; !exists; prevHash = prevBlock.prevHash() {
+		prevBlock, exists = m.chain[prevHash]
 		for _, addr := range m.PeerMinersAddrs {
 			// go
 			client, err := rpc.DialHTTP("tcp", addr)
@@ -276,21 +310,20 @@ func (m *Miner) requestPreviousBlocks(block Block) error {
 			if err != nil {
 				log.Fatal("requestPreviousBlocks error:", err)
 				return err
-			} else {
-				chain[block.hash()] = *replyBlock
-				fmt.Println("requestPreviousBlocks successed:", (*replyBlock).hash())
 			}
+			m.chain[block.hash()] = *replyBlock
+			fmt.Println("requestPreviousBlocks successed:", (*replyBlock).hash())
 		}
 	}
 	return nil
 }
 
 func (m *Miner) updateChainTip(prevHash string) error {
-	prevBlock, exists := chain[prevHash]
+	prevBlock, exists := m.chain[prevHash]
 	if exists {
 		inChainTips := false
 		tipIndex := 0
-		for i, v := range chainTips {
+		for i, v := range m.chainTips {
 			if v.Block == prevBlock {
 				inChainTips = true
 				tipIndex = i
@@ -298,12 +331,12 @@ func (m *Miner) updateChainTip(prevHash string) error {
 		}
 		if inChainTips {
 			// we are the first one to work on an original branch
-			chainTips[tipIndex] = ChainTip{chainTips[tipIndex].length + 1, prevBlock}
+			m.chainTips[tipIndex] = ChainTip{m.chainTips[tipIndex].length + 1, prevBlock}
 		} else {
 			// this is a fork of another branch
 			prevHeight, err := m.getHeight(prevBlock)
 			if err != nil {
-				chainTips = append(chainTips, ChainTip{prevHeight + 1, prevBlock})
+				m.chainTips = append(m.chainTips, ChainTip{prevHeight + 1, prevBlock})
 			} else {
 				// ask other miners for the previous block?
 				return err
@@ -314,27 +347,68 @@ func (m *Miner) updateChainTip(prevHash string) error {
 	return errors.New("Cannot find the previous block")
 }
 
+// getBalance finds the current balance along the chain starting
+func (m *Miner) getBalance(block Block, minerID string) (uint32, error) {
+	foundBalance := false
+	var mostRecentBalance uint32
+	var recentTrasactionFee uint32
+	for block.hash() != block.prevHash() {
+		switch t := block.(type) {
+		case NOPBlock:
+			if t.MinerID == minerID {
+				mostRecentBalance = t.MinerBalance
+				break
+			}
+		case OPBlock:
+			if t.MinerID == minerID {
+				mostRecentBalance = t.MinerBalance
+				foundBalance := true
+				break
+			}
+			for i, record := range t.Records {
+				if record.MinerID == minerID {
+					if record.OperationType == "append" {
+						recentTrasactionFee++
+					} else if record.OperationType == "create" {
+						recentTrasactionFee += uint32(miner.NumCoinsPerFileCreate)
+					}
+				}
+			}
+			break
+		default:
+			return 0, errors.New("Encountered an unknown block")
+		}
+		nextBlock, exists := m.chain[block.prevHash()]
+		if exists {
+			block = nextBlock
+		} else {
+			return 0, errors.New("This chain does not have a valid head")
+		}
+
+	}
+	if foundBalance {
+		return mostRecentBalance - recentTrasactionFee, nil
+	}
+	return 0, nil
+}
+
 func (m *Miner) addBlock(block Block) error {
 	err := m.validateBlock(block)
 	if err == nil {
-		switch block.(type) {
-		default:
-			return errors.New("Invalid Block Type")
-		case OPBlock:
-		case NOPBlock:
-			err := m.updateChainTip(block.hash())
-			if err != nil {
-				return err
-			}
-			return nil
-		case GenesisBlock:
-			if len(chainTips) == 0 {
-				chain[block.hash()] = block
-				chainTips = append(chainTips, ChainTip{1, block})
+		if block.hash() == block.prevHash() {
+			// GenesisBlock case
+			if len(m.chainTips) == 0 {
+				m.chain[block.hash()] = block
+				m.chainTips = append(m.chainTips, ChainTip{1, block})
 			} else {
 				return errors.New("The local chain already contains a GenesisBlock")
 			}
 		}
+		err := m.updateChainTip(block.hash())
+		if err != nil {
+			return err
+		}
+		return nil
 	}
 	// validation error
 	return err
@@ -376,10 +450,10 @@ func validateNonce(block Block, difficulty uint8) bool {
 	return false
 }
 
-func (m *Miner) findBlockFromLongestChain() Block {
+func (m *Miner) getBlockFromLongestChain() Block {
 	maxBlocksNum := 0
 	var longestChainTip Block
-	for _, v := range chainTips {
+	for _, v := range m.chainTips {
 		if v.length > maxBlocksNum {
 			maxBlocksNum = v.length
 			longestChainTip = v
@@ -392,12 +466,12 @@ func (m *Miner) findBlockFromLongestChain() Block {
 func (m *Miner) computeNOPBlock() {
 	var nonce uint32
 	nonce = 1
-	prevHash := m.findBlockFromLongestChain().hash()
-	nopBlock := NOPBlock{prevHash, m.MinerID, nonce}
+	prevHash := m.getBlockFromLongestChain().hash()
+	nopBlock := NOPBlock{prevHash, nonce, m.MinerID, m.Balance + uint32(m.MinedCoinsPerNoOpBlock)}
 	for {
 		select {
 		default:
-			nopBlock = NOPBlock{prevHash, m.MinerID, nonce}
+			nopBlock = NOPBlock{prevHash, nonce, m.MinerID, m.Balance + uint32(m.MinedCoinsPerNoOpBlock)}
 			if validateNonce(nopBlock, m.PowPerNoOpBlock) == true {
 				m.GeneratedBlocksChan <- nopBlock
 			}
@@ -413,12 +487,12 @@ func (m *Miner) computeNOPBlock() {
 func (m *Miner) computeOPBlock(records []OperationRecord) {
 	var nonce uint32
 	nonce = 1
-	prevHash := m.findBlockFromLongestChain().hash()
-	opBlock := OPBlock{prevHash, records, m.MinerID, nonce}
+	prevHash := m.getBlockFromLongestChain().hash()
+	opBlock := OPBlock{prevHash, records, nonce, m.MinerID, m.Balance + uint32(m.MinedCoinsPerOpBlock)}
 	for {
 		select {
 		default:
-			opBlock = OPBlock{prevHash, records, m.MinerID, nonce}
+			opBlock = OPBlock{prevHash, records, nonce, m.MinerID, m.Balance + uint32(m.MinedCoinsPerOpBlock)}
 			if validateNonce(opBlock, m.PowPerOpBlock) == true {
 				m.GeneratedBlocksChan <- opBlock
 			}
@@ -503,10 +577,8 @@ func (m *Miner) broadcastBlock(block Block) error {
 
 	if len(errStrings) > 0 {
 		return errors.New("one or multiple submitBlockCall failed")
-	} else {
-		return nil
 	}
-
+	return nil
 }
 
 func (m *Miner) initializeBlockChain(genesisBlockHash string, peerMinersAddrs []string) error {
