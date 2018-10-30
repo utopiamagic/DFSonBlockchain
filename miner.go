@@ -31,6 +31,7 @@ import (
 // Block is the interface for GenesisBlock, NOPBlock and OPBlock
 type Block interface {
 	hash() string
+	// getHeight() (uint32, error)
 }
 
 // GenesisBlock is the first block in this blockchain
@@ -164,11 +165,21 @@ var unconfirmedOperations []OperationRecord
 var chainTips []ChainTip
 var miner Miner
 
-// GetChainTips provides the active starting point of the current blockchain
+// GetChainTips RPC provides the active starting point of the current blockchain
 // parameter arg is optional and not being used at all
 func (mapi *MinerAPI) GetChainTips(arg interface{}, reply *[]ChainTip) error {
 	*reply = chainTips
 	return nil
+}
+
+// GetBlock RPC gets a block with a particular header hash from the local blockchain map
+func (mapi *MinerAPI) GetBlock(headerHash string, reply *Block) error {
+	block, exists := chain[headerHash]
+	if exists {
+		*reply = block
+		return nil
+	}
+	return errors.New("The requested block does not exist in the local blockchain:" + miner.MinerID)
 }
 
 // validateBlock returns true if the given block is valid, false otherwise
@@ -219,16 +230,120 @@ func (m *Miner) validateBlock(block Block) error {
 	return nil
 }
 
-// SubmitRecord is an RPC call invoked by the RFS Client
-// it submits operationRecord to the miner network if the coins mined are sufficient to perform the operation
+// SubmitRecord RPC call should be invoked by the RFS Client
+// it submits operationRecord to the miner network if the mined coins are sufficient to cover the cost
 func (capi *ClientAPI) SubmitRecord(operationRecord *OperationRecord, status *bool) error {
 	return nil
+}
+
+// getHeight returns the height of the given block in the local chain
+func (m *Miner) getHeight(block Block) (int, error) {
+	switch block.(type) {
+	default:
+		return 0, errors.New("Encountered a block of unknown type")
+	case OPBlock:
+	case NOPBlock:
+		prevBlock, exists := chain[block.hash()]
+		if exists {
+			prevHeight, err := m.getHeight(prevBlock)
+			if err == nil {
+				return prevHeight + 1, nil
+			}
+			return prevHeight, err
+		}
+		return 1, errors.New("The given NOPBlock/OPBlock is an orphant block")
+	case GenesisBlock:
+		return 1, nil
+	}
+	return 0, errors.New("this will never be reached")
+}
+
+func (m *Miner) requestPreviousBlocks(block Block) error {
+	prevHash := block.hash()
+	prevBlock, exists := chain[prevHash]
+	for ; !exists; prevHash = prevBlock.hash() {
+		prevBlock, exists = chain[prevHash]
+		for _, addr := range m.PeerMinersAddrs {
+			// go
+			client, err := rpc.DialHTTP("tcp", addr)
+			if err != nil {
+				log.Fatal("dialing:", addr, err)
+				continue
+			}
+			// Then it can make a remote asynchronous call
+			replyBlock := new(Block)
+			err = client.Call("MinerAPI.GetBlock", prevHash, replyBlock)
+			if err != nil {
+				log.Fatal("requestPreviousBlocks error:", err)
+				return err
+			} else {
+				chain[block.hash()] = *replyBlock
+				fmt.Println("requestPreviousBlocks successed:", (*replyBlock).hash())
+			}
+		}
+	}
+	return nil
+}
+
+func (m *Miner) updateChainTip(prevHash string) error {
+	prevBlock, exists := chain[prevHash]
+	if exists {
+		inChainTips := false
+		tipIndex := 0
+		for i, v := range chainTips {
+			if v.Block == prevBlock {
+				inChainTips = true
+				tipIndex = i
+			}
+		}
+		if inChainTips {
+			// we are the first one to work on an original branch
+			chainTips[tipIndex] = ChainTip{chainTips[tipIndex].length + 1, prevBlock}
+		} else {
+			// this is a fork of another branch
+			prevHeight, err := m.getHeight(prevBlock)
+			if err != nil {
+				chainTips = append(chainTips, ChainTip{prevHeight + 1, prevBlock})
+			} else {
+				// ask other miners for the previous block?
+				return err
+			}
+		}
+		return nil
+	}
+	return errors.New("Cannot find the previous block")
+}
+
+func (m *Miner) addBlock(block Block) error {
+	err := m.validateBlock(block)
+	if err == nil {
+		switch block.(type) {
+		default:
+			return errors.New("Invalid Block Type")
+		case OPBlock:
+		case NOPBlock:
+			err := m.updateChainTip(block.hash())
+			if err != nil {
+				return err
+			}
+			return nil
+		case GenesisBlock:
+			if len(chainTips) == 0 {
+				chain[block.hash()] = block
+				chainTips = append(chainTips, ChainTip{1, block})
+			} else {
+				return errors.New("The local chain already contains a GenesisBlock")
+			}
+		}
+	}
+	// validation error
+	return err
 }
 
 // SubmitBlock is an RPC call invoked by other Miner instances
 // it accepts the given block upon successful validation
 func (mapi *MinerAPI) SubmitBlock(block Block, status *bool) error {
-	err := miner.validateBlock(block)
+	err := miner.addBlock(block)
 	if err == nil {
 		*status = true
 		// miner.broadcastBlock(genesisBlock)
@@ -262,12 +377,15 @@ func validateNonce(block Block, difficulty uint8) bool {
 }
 
 func (m *Miner) findBlockFromLongestChain() Block {
-	/*
-		for _, v := range chainTips {
-
+	maxBlocksNum := 0
+	var longestChainTip Block
+	for _, v := range chainTips {
+		if v.length > maxBlocksNum {
+			maxBlocksNum = v.length
+			longestChainTip = v
 		}
-	*/
-	return nil
+	}
+	return longestChainTip
 }
 
 // computeNOPBlock tries to construct a NOPBlock when it is not requested to stop
@@ -352,7 +470,9 @@ func (m *Miner) generateBlocks() {
 	}
 }
 
-func (m *Miner) broadcastBlock(block Block) {
+func (m *Miner) broadcastBlock(block Block) error {
+	var calls []*rpc.Call
+	var errStrings []string
 	for _, addr := range m.PeerMinersAddrs {
 		// go
 		client, err := rpc.DialHTTP("tcp", addr)
@@ -363,14 +483,28 @@ func (m *Miner) broadcastBlock(block Block) {
 		// Then it can make a remote asynchronous call
 		reply := new(bool)
 		submitBlockCall := client.Go("MinerAPI.SubmitBlock", block, reply, nil)
-		replyCall := <-submitBlockCall.Done // will be equal to divCall
-		// Synchronous call
-		args := &block
-		err = client.Call("MinerAPI.SubmitBlock", args, &reply)
-		if err != nil {
-			log.Fatal("SubmitBlock error:", err)
+		append(calls, submitBlockCall)
+	}
+
+	for i, call := range calls {
+		// do something with e.Value
+		replyCall := <-call.Done // will be equal to divCall
+		if replyCall.Error == nil {
+			if replyCall.Reply == true {
+				continue
+			} else {
+				append(errStrings, "submitBlockCall.Reply is false")
+			}
+		} else {
+			errString := m.PeerMinersAddrs[i] + ": " + replyCall.Error.Error()
+			append(errStrings, errString)
 		}
-		fmt.Println("SubmitBlock successed:", reply)
+	}
+
+	if len(errStrings) > 0 {
+		return errors.New("one or multiple submitBlockCall failed")
+	} else {
+		return nil
 	}
 
 }
