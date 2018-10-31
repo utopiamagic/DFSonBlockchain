@@ -68,6 +68,7 @@ func (e FileMaxLenReachedError) Error() string {
 // Represents a connection to the RFS system.
 type RFS interface {
 	// Creates a new empty RFS file with name fname.
+	// Requires record coins.
 	//
 	// Can return the following errors:
 	// - DisconnectedError
@@ -105,6 +106,7 @@ type RFS interface {
 	// contents pointed to by record. Returns the position of the
 	// record that was just appended as recordNum. Returns a non-nil
 	// error if the operation was unsuccessful.
+	// Requires record coins.
 	//
 	// Can return the following errors:
 	// - DisconnectedError
