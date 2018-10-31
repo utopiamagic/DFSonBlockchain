@@ -104,8 +104,9 @@ func (opblock OPBlock) minerID() string {
 type OperationRecord struct {
 	RecordData    rfslib.Record // rfslib operation data
 	OperationType string        // rfslib operation type (one of ["append", "create"])
-	RecordNum     uint16
-	MinerID       string // An identifier that specifies the miner identifier whose record coins sponsor this operation (op-minerID)
+	FileName      string        // The name of file being operated
+	RecordNum     uint16        // The chunk number of the file
+	MinerID       string        // An identifier that specifies the miner identifier whose record coins sponsor this operation
 }
 
 // Miner mines blocks.
@@ -179,13 +180,13 @@ type Settings struct {
 
 // ClientAPI is the set of RPC calls provided to RFS
 type ClientAPI struct {
-	IncomingClientsAddr string // The local IP:port where this miner should expect to receive connections from RFS clients (address it should listen on for connections from clients)
+	IncomingClientsAddr string // The local IP:port where this miner should expect to receive connections from RFS clients
 }
 
 // MinerAPI is the set of RPC calls provided to other miners
 type MinerAPI struct {
-	PeerMinersAddrs    []string // An array of remote IP:port addresses, one per peer miner that this miner should connect to (using the OutgoingMinersIP below)
-	IncomingMinersAddr string   // The local IP:port where the miner should expect other miners to connect to it (address it should listen on for connections from miners)
+	PeerMinersAddrs    []string // An array of remote IP:port addresses, one per peer miner that this miner should connect to
+	IncomingMinersAddr string   // The local IP:port where the miner should expect other miners to connect to it
 }
 
 // ChainTip is ...
@@ -213,6 +214,48 @@ func (mapi *MinerAPI) GetBlock(headerHash string, reply *Block) error {
 	return errors.New("The requested block does not exist in the local blockchain:" + miner.MinerID)
 }
 
+// checkSemantics checks that each operation does not violate RFS semantics
+// (e.g., a record is not mutated or inserted into the middled of an rfs file).
+func (m *Miner) checkSemantics(block Block, opRecord OperationRecord) error {
+	currentRecordNum := opRecord.RecordNum
+	for block.hash() != block.prevHash() {
+		prevBlock, ok := m.chain[block.prevHash()]
+		if !ok {
+			return errors.New("Encountered an orphaned block when checking RFS semantics")
+		}
+		switch t := block.(type) {
+		case NOPBlock:
+			break
+		case OPBlock:
+			if opRecord.OperationType == "create" {
+				for _, prevRecord := range t.Records {
+					if prevRecord.FileName == opRecord.FileName {
+						return errors.New("The given file name already exists in this chain")
+					}
+				}
+			} else if opRecord.OperationType == "append" {
+				for _, prevRecord := range t.Records {
+					if currentRecordNum == prevRecord.RecordNum+1 {
+						currentRecordNum = prevRecord.RecordNum
+						if currentRecordNum == 0 {
+							// TODO: decide the initial record num for append
+							return nil
+						}
+					} else {
+						return errors.New("Encountered an invalid OperationRecord (inserted into the middled of an rfs file)")
+					}
+				}
+			} else {
+				return errors.New("Encountered an invalid OperationRecord Type")
+			}
+		default:
+			return errors.New("Encountered an invalid intermediate block when checking RFS semantics")
+		}
+		block = prevBlock
+	}
+	return nil
+}
+
 // validateBlock returns true if the given block is valid, false otherwise
 func (m *Miner) validateBlock(block Block) error {
 	// Block validations
@@ -231,11 +274,30 @@ func (m *Miner) validateBlock(block Block) error {
 		// Operation validations:
 		// Check that each operation in the block is associated with a miner ID that has enough record coins to pay for the operation
 		// (i.e., the number of record coins associated with the minerID must have sufficient balance to 'pay' for the operation).
+		balanceRequiredMap := make(map[string]uint32)
+		for _, opRecord := range t.Records {
+			if opRecord.OperationType == "create" {
+				balanceRequiredMap[opRecord.MinerID] += uint32(m.NumCoinsPerFileCreate)
+			} else if opRecord.OperationType == "append" {
+				balanceRequiredMap[opRecord.MinerID]++
+			}
+		}
+		for minerID, balanceRequired := range balanceRequiredMap {
+			balance, err := m.getBalance(t, minerID)
+			if err != nil {
+				return errors.New("Checking balanceRequired:" + err.Error())
+			} else if balance < balanceRequired {
+				return errors.New("The miner of the OperationRecord does not have enough balance")
+			}
+		}
 
 		// Check that each operation does not violate RFS semantics
 		// (e.g., a record is not mutated or inserted into the middled of an rfs file).
-
-		m.chain[t.hash()] = t
+		for _, opRecord := range t.Records {
+			if err := m.checkSemantics(t, opRecord); err != nil {
+				return err
+			}
+		}
 		break
 	case NOPBlock:
 		if validateNonce(t, m.PowPerNoOpBlock) == false {
@@ -256,8 +318,6 @@ func (m *Miner) validateBlock(block Block) error {
 			return errors.New("A GenesisBlock already existed")
 		}
 	}
-	// stop computeNOPBlock and computeNOPBlock
-	// quitMining <- true
 	return nil
 }
 
@@ -303,7 +363,7 @@ func (m *Miner) getHeight(block Block) (int, error) {
 		}
 		return prevHeight, err
 	}
-	return 1, errors.New("The given NOPBlock/OPBlock starts with an orphant block:" + block.hash())
+	return 1, errors.New("The given NOPBlock/OPBlock starts with an orphaned block:" + block.hash())
 }
 
 func (m *Miner) requestPreviousBlocks(block Block) error {
@@ -434,6 +494,8 @@ func (mapi *MinerAPI) SubmitBlock(block Block, status *bool) error {
 	err := miner.addBlock(block)
 	if err == nil {
 		*status = true
+		// stop computeNOPBlock and computeNOPBlock
+		// quitMining <- true
 		// miner.broadcastBlock(genesisBlock)
 		return nil
 	}
