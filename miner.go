@@ -111,16 +111,27 @@ type OperationRecord struct {
 	MinerID       string        // An identifier that specifies the miner identifier whose record coins sponsor this operation
 }
 
+// PeerMinerInfo is ...
+type PeerMinerInfo struct {
+	IncomingMinersAddr string
+	MinerID            string
+}
+
 // Miner mines blocks.
 type Miner struct {
+	// These would not change once initialized
 	Settings
-	Logger              *govec.GoLog // The GoVector Logger
-	GeneratedBlocksChan chan Block   // Channel of generated blocks
-	StopMiningChan      chan string  // Channel that stops computeOPBlock or computeNOPBlock
+	Logger       *govec.GoLog       // The GoVector Logger
+	GoVecOptions govec.GoLogOptions // The GoVector log options
+
+	GeneratedBlocksChan chan Block           // Channel of generated blocks
+	StopMiningChan      chan string          // Channel that stops computeOPBlock or computeNOPBlock
+	OperationRecordChan chan OperationRecord // Channel of valid operation records received from other miners
 
 	// No need to initialize :)
-	chain     sync.Map // [hash => Block] All the blocks in the network
-	chainTips sync.Map // [Block => height of the fork] The collection of the head of all valid forks
+	chain      sync.Map // {hash: Block} All the blocks in the network
+	chainTips  sync.Map // {Block: height of the fork} The collection of the tails of all valid forks
+	peerMiners sync.Map // {minerID: *rpc.Client} The connected peer miners (including these newly joined)
 }
 
 // Settings contains all miner settings and is loaded through
@@ -185,8 +196,7 @@ type ClientAPI struct {
 
 // MinerAPI is the set of RPC calls provided to other miners
 type MinerAPI struct {
-	PeerMinersAddrs    []string // An array of remote IP:port addresses, one per peer miner that this miner should connect to
-	IncomingMinersAddr string   // The local IP:port where the miner should expect other miners to connect to it
+	IncomingMinersAddr string // The local IP:port where the miner should expect other miners to connect to it
 }
 
 var miner Miner
@@ -212,6 +222,31 @@ func (mapi *MinerAPI) GetBlock(headerHash string, reply *Block) error {
 		return nil
 	}
 	return errors.New("The requested block does not exist in the local blockchain:" + miner.MinerID)
+}
+
+func (m *Miner) addNode(minerInfo PeerMinerInfo) error {
+	client, err := vrpc.RPCDial("tcp", minerInfo.IncomingMinersAddr, m.Logger, m.GoVecOptions)
+	if err != nil {
+		log.Fatal("addNode dialing:", minerInfo.IncomingMinersAddr, err)
+		return err
+	}
+	miner.peerMiners.Store(minerInfo.MinerID, client)
+	return nil
+}
+
+// AddNode RPC adds the remote node to its own network
+func (mapi *MinerAPI) AddNode(minerInfo PeerMinerInfo, received *bool) error {
+	*received = true
+	if err := miner.addNode(minerInfo); err != nil {
+		return err
+	}
+	return nil
+}
+
+// GetPeerInfo RPC returns the current miner info
+func (mapi *MinerAPI) GetPeerInfo(caller string, minerID *string) error {
+	minerID = &miner.MinerID
+	return nil
 }
 
 // validateRecordSemantics checks that each operation does not violate RFS semantics
@@ -319,30 +354,63 @@ func (m *Miner) validateBlock(block Block) error {
 	return nil
 }
 
-// SubmitRecord RPC call should be invoked by the RFS Client
-// it submits operationRecord to the miner network if the mined coins are sufficient to cover the cost
-func (capi *ClientAPI) SubmitRecord(operationRecord *OperationRecord, status *bool) error {
+// SubmitRecord RPC from MinerAPI submits operationRecord to the miner network
+// if the mined coins are sufficient to cover the cost
+func (mapi *MinerAPI) SubmitRecord(operationRecord *OperationRecord, received *bool) error {
+	*received = true
 	block := miner.getBlockFromLongestChain()
-	balance, err := miner.getBalance(block, miner.MinerID)
+	balance, err := miner.getBalance(block, operationRecord.MinerID)
 	if err != nil {
 		return errors.New("Checking balanceRequired:" + err.Error())
+	}
+	err = miner.validateRecordSemantics(block, *operationRecord)
+	if err != nil {
+		return err
 	}
 	switch operationRecord.OperationType {
 	case "delete":
 		break
 	case "create":
 		if uint32(miner.NumCoinsPerFileCreate) > balance {
-			*status = false
 			return errors.New("The current balance is not enough to cover create")
 		}
-		fallthrough
+	case "append":
+		if balance < 1 {
+			return errors.New("The current balance is not enough to cover append")
+		}
+	}
+	miner.OperationRecordChan <- *operationRecord
+	miner.broadcastOperationRecord(operationRecord)
+	return nil
+}
+
+// SubmitRecord RPC call from ClientAPI submits operationRecord to the miner network
+// if the mined coins are sufficient to cover the cost
+func (capi *ClientAPI) SubmitRecord(operationRecord *OperationRecord, received *bool) error {
+	block := miner.getBlockFromLongestChain()
+	*received = true
+	balance, err := miner.getBalance(block, miner.MinerID)
+	if err != nil {
+		return errors.New("Checking balanceRequired:" + err.Error())
+	}
+	err = miner.validateRecordSemantics(block, *operationRecord)
+	if err != nil {
+		return err
+	}
+	switch operationRecord.OperationType {
+	case "delete":
+		break
+	case "create":
+		if uint32(miner.NumCoinsPerFileCreate) > balance {
+			return errors.New("The current balance is not enough to cover create")
+		}
 	case "append":
 		if balance < 1 {
 			return errors.New("The current balance is not enough to cover create or append")
 		}
-		*status = true
-		miner.broadcastOperationRecord(operationRecord)
 	}
+	miner.OperationRecordChan <- *operationRecord
+	miner.broadcastOperationRecord(operationRecord)
 	return nil
 }
 
@@ -371,28 +439,30 @@ func (m *Miner) getOperationRecordHeight(block Block, srcRecord OperationRecord)
 }
 
 // ConfirmOperation RPC should be invoked by the RFS Client
-// upon succesfully confimation it sets status to true
-func (capi *ClientAPI) ConfirmOperation(operationRecord *OperationRecord, status *bool) error {
+// upon succesfully confimation it returns nil
+func (capi *ClientAPI) ConfirmOperation(operationRecord *OperationRecord, received *bool) error {
 	block := miner.getBlockFromLongestChain()
+	*received = true
 	confirmedBlocksNum, err := miner.getOperationRecordHeight(block, *operationRecord)
 	if err != nil {
-		*status = false
 		return err
 	}
-	if operationRecord.OperationType == "append" {
-		if int(miner.ConfirmsPerFileAppend) > confirmedBlocksNum {
-			*status = false
-		} else {
-			*status = true
-		}
-	} else if operationRecord.OperationType == "create" {
+	switch operationRecord.OperationType {
+	default:
+		return errors.New("Operation Type not recognized")
+	case "delete":
+		return errors.New("Delete not supported")
+	case "create":
 		if int(miner.ConfirmsPerFileCreate) > confirmedBlocksNum {
-			*status = false
-		} else {
-			*status = true
+			return errors.New("Operation create not confirmed")
 		}
+		return nil
+	case "append":
+		if int(miner.ConfirmsPerFileAppend) > confirmedBlocksNum {
+			return errors.New("Operation append not confirmed")
+		}
+		return nil
 	}
-	return nil
 }
 
 // GetBalance RPC call should be invoked by the RFS Client and does not take an input
@@ -502,23 +572,22 @@ func (m *Miner) requestPreviousBlocks(block Block) error {
 	prevHash := block.prevHash()
 	prevBlock, exists := m.chain.Load(prevHash)
 	for ; !exists; prevHash = prevBlock.(Block).prevHash() {
-		prevBlock, exists = m.chain.Load(prevHash)
-		for _, addr := range m.PeerMinersAddrs {
-			options := govec.GetDefaultLogOptions()
-			client, err := vrpc.RPCDial("tcp", addr, m.Logger, options)
-			if err != nil {
-				log.Fatal("dialing:", addr, err)
-				continue
-			}
-			// Then it can make a remote asynchronous call
+		m.peerMiners.Range(func(remoteMinerID, client interface{}) bool {
+			// Make a remote asynchronous call
 			replyBlock := new(Block)
-			err = client.Call("MinerAPI.GetBlock", prevHash, replyBlock)
+			err := client.(*rpc.Client).Call("MinerAPI.GetBlock", prevHash, replyBlock)
 			if err != nil {
-				log.Fatal("requestPreviousBlocks error:", err)
-				return err
+				log.Fatal("requestPreviousBlocks error:", err, "continue on with other miners")
+				return true
 			}
 			m.chain.Store(block.hash(), *replyBlock)
 			fmt.Println("requestPreviousBlocks successed:", (*replyBlock).hash())
+			// stop iteration
+			return false
+		})
+		prevBlock, exists = m.chain.Load(prevHash)
+		if !exists {
+			return errors.New("Cannot find the requested block from other peer miners")
 		}
 	}
 	return nil
@@ -573,7 +642,7 @@ func (m *Miner) getBalance(block Block, minerID string) (uint32, error) {
 				foundBalance := true
 				break
 			}
-			for i, record := range t.Records {
+			for _, record := range t.Records {
 				if record.MinerID == minerID {
 					if record.OperationType == "append" {
 						recentTrasactionFee++
@@ -585,13 +654,12 @@ func (m *Miner) getBalance(block Block, minerID string) (uint32, error) {
 		default:
 			return 0, errors.New("Encountered an unknown block")
 		}
-		nextBlock, exists := m.chain.Load(block.prevHash())
+		prevBlock, exists := m.chain.Load(block.prevHash())
 		if exists {
-			block = nextBlock.(Block)
+			block = prevBlock.(Block)
 		} else {
 			return 0, errors.New("This chain does not have a valid head")
 		}
-
 	}
 	if foundBalance {
 		return mostRecentBalance - recentTrasactionFee, nil
@@ -621,12 +689,11 @@ func (m *Miner) addBlock(block Block) error {
 }
 
 // SubmitBlock RPC is invoked by other Miner instances and accepts the given block upon successful validation
-func (mapi *MinerAPI) SubmitBlock(block Block, status *bool) error {
+func (mapi *MinerAPI) SubmitBlock(block Block, received *bool) error {
+	*received = true
 	err := miner.addBlock(block)
 	if err == nil {
-		*status = true
-		miner.broadcastBlock(block)
-		return nil
+		err = miner.broadcastBlock(block)
 	}
 	return err
 }
@@ -661,6 +728,7 @@ func (m *Miner) validateFork(block Block) error {
 		if !exists {
 			return errors.New("This is an orphaned chain")
 		}
+		block = prevBlock.(Block)
 	}
 	return nil
 }
@@ -708,7 +776,7 @@ func (m *Miner) computeNOPBlock() {
 
 func (m *Miner) computeCoinsRequired(records []OperationRecord, minerID string) (int, error) {
 	var coins int
-	for i, v := range records {
+	for _, v := range records {
 		if v.MinerID == minerID {
 			switch v.OperationType {
 			case "append":
@@ -763,8 +831,8 @@ func (m *Miner) generateBlocks() {
 	m.StopMiningChan = make(chan string)
 	// m.NOPBlockStopChan = make(chan string)
 	m.GeneratedBlocksChan = make(chan Block)
-	operationRecordChan := make(chan OperationRecord)
-	var records []OperationRecord
+	m.OperationRecordChan = make(chan OperationRecord)
+	recordsMap := make(map[OperationRecord]bool)
 	generatingNOPBlock := false
 	generatingOPBlock := false
 	for {
@@ -788,20 +856,26 @@ func (m *Miner) generateBlocks() {
 				log.Fatalln("Received the generated block of some other type")
 			}
 		// we have received a new record
-		case operationRecord := <-operationRecordChan:
+		case operationRecord := <-m.OperationRecordChan:
 			if opBlockTimer.Stop() {
 				opBlockTimer.Reset(time.Duration(m.GenOpBlockTimeout) * time.Millisecond)
 				if generatingNOPBlock {
 					m.StopMiningChan <- "generateBlocks(newRecord, NOPBlock)"
 				}
 			}
-			records = append(records, operationRecord)
+			if _, ok := recordsMap[operationRecord]; !ok {
+				recordsMap[operationRecord] = true
+			}
 		case <-opBlockTimer.C:
 			if generatingNOPBlock {
 				log.Panicf("We should not be working on NOPBlocks by now")
 			}
 			if generatingOPBlock {
 				m.StopMiningChan <- "generateBlocks(timedOut, OPBlock)"
+			}
+			records := make([]OperationRecord, 0, len(recordsMap))
+			for k := range recordsMap {
+				records = append(records, k)
 			}
 			go m.computeOPBlock(records)
 			generatingOPBlock = true
@@ -812,19 +886,13 @@ func (m *Miner) generateBlocks() {
 func (m *Miner) broadcastBlock(block Block) error {
 	var calls []*rpc.Call
 	var errStrings []string
-	for _, addr := range m.PeerMinersAddrs {
-		options := govec.GetDefaultLogOptions()
-		client, err := vrpc.RPCDial("tcp", addr, miner.Logger, options)
-		if err != nil {
-			log.Fatal("dialing:", addr, err)
-			continue
-		}
+	m.peerMiners.Range(func(remoteMinerID, client interface{}) bool {
 		// Then it can make a remote asynchronous call
 		reply := new(bool)
-		submitBlockCall := client.Go("MinerAPI.SubmitBlock", block, reply, nil)
+		submitBlockCall := client.(*rpc.Client).Go("MinerAPI.SubmitBlock", block, reply, nil)
 		calls = append(calls, submitBlockCall)
-	}
-
+		return true
+	})
 	for i, call := range calls {
 		// do something with e.Value
 		replyCall := <-call.Done // will be equal to divCall
@@ -847,58 +915,64 @@ func (m *Miner) broadcastBlock(block Block) error {
 }
 
 func (m *Miner) broadcastOperationRecord(opRecord *OperationRecord) error {
-	var calls []*rpc.Call
-	var errStrings []string
-	for _, addr := range m.PeerMinersAddrs {
-		options := govec.GetDefaultLogOptions()
-		client, err := vrpc.RPCDial("tcp", addr, miner.Logger, options)
-		if err != nil {
-			log.Fatal("dialing:", addr, err)
-			continue
-		}
-		// Then it can make a remote asynchronous call
+	calls := make(map[string]*rpc.Call)
+	failedCalls := make([]string, 100)
+	// successedCalls := make([]string)
+	m.peerMiners.Range(func(remoteMinerID, client interface{}) bool {
 		reply := new(bool)
-		submitRecordCall := client.Go("MinerAPI.SubmitRecord", opRecord, reply, nil)
-		calls = append(calls, submitRecordCall)
-	}
-
-	for i, call := range calls {
+		submitRecordCall := client.(*rpc.Client).Go("MinerAPI.SubmitRecord", opRecord, reply, nil)
+		log.Println("broadcastOperationRecord:")
+		calls[remoteMinerID.(string)] = submitRecordCall
+		return true
+	})
+	for remoteMinerID, call := range calls {
 		// do something with e.Value
 		replyCall := <-call.Done // will be equal to divCall
-		if replyCall.Error == nil {
-			if replyCall.Reply == true {
-				continue
-			} else {
-				errStrings = append(errStrings, "submitRecordCall.Reply is false")
-			}
+		if replyCall.Error == nil && replyCall.Reply == true {
+			continue
 		} else {
-			errString := m.PeerMinersAddrs[i] + ": " + replyCall.Error.Error()
-			errStrings = append(errStrings, errString)
+			failedCalls = append(failedCalls, remoteMinerID)
 		}
 	}
-
-	if len(errStrings) > 0 {
-		return errors.New("one or multiple submitBlockCall failed")
+	if len(failedCalls) > 0 {
+		return errors.New("submitBlockCall failed" + string(len(failedCalls)) + " of " + string(len(calls)))
 	}
 	return nil
 }
 
-func (m *Miner) initializeChains(genesisBlockHash string, peerMinersAddrs []string) error {
-	genesisBlock := GenesisBlock{genesisBlockHash, m.MinerID}
-	options := govec.GetDefaultLogOptions()
+func (m *Miner) initializeMiner(settings Settings) error {
+	m.Settings = settings
+	m.GoVecOptions = govec.GetDefaultLogOptions()
+
+	genesisBlock := GenesisBlock{m.GenesisBlockHash, m.MinerID}
+	err := m.addBlock(genesisBlock)
+	if err != nil {
+		return err
+	}
 	for _, addr := range m.PeerMinersAddrs {
-		client, err := vrpc.RPCDial("tcp", addr, miner.Logger, options)
+		client, err := vrpc.RPCDial("tcp", addr, miner.Logger, m.GoVecOptions)
 		if err != nil {
 			log.Fatal("dialing:", addr, err)
 			return err
 		}
-		// Then it can make a remote call
+		// Then make a remote call
+		var remoteMinerID string
+		var status bool
+		client.Call("MinerAPI.GetMinerInfo", miner.MinerID+"initializeChains", &remoteMinerID)
+		err = client.Call("MinerAPI.AddNode", PeerMinerInfo{m.IncomingMinersAddr, m.MinerID}, &status)
+		if err != nil || status != true {
+			// TODO: consider retry?
+		}
+		m.peerMiners.Store(remoteMinerID, client)
 		remoteChainTips := new(map[Block]int)
 		err = client.Call("MinerAPI.GetChainTips", miner.MinerID+"initializeChains", remoteChainTips)
 		if err == nil {
 			for remoteBlock, height := range *remoteChainTips {
+				m.requestPreviousBlocks(remoteBlock)
 				m.chainTips.Store(remoteBlock, height)
 			}
+		} else {
+			log.Println(err)
 		}
 	}
 	return nil
@@ -941,7 +1015,8 @@ func main() {
 	}
 	fmt.Println("Loaded settings", settings)
 
-	fmt.Println("Starting miner server")
+	fmt.Println("Starting miner prepration")
+	miner.initializeMiner(settings)
 
 	// Register RPC methods for other miners to call.
 	minerAPI := new(MinerAPI)
@@ -961,7 +1036,7 @@ func main() {
 	miner.Logger = logger
 	go vrpc.ServeRPCConn(minerServer, l, logger, options)
 
-	// Register RPC methods for clients to call.
+	// Register RPC methods for clients to call
 	clientAPI := new(ClientAPI)
 	clientServer := rpc.NewServer()
 	clientServer.Register(clientAPI)
