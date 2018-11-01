@@ -296,14 +296,14 @@ func (m *Miner) validateBlock(block Block) error {
 	// Block validations
 	switch t := block.(type) {
 	default:
-		return errors.New("Invalid Block Type")
+		return errors.New("validateBlock: invalid Block Type " + block.hash())
 	case OPBlock:
 		if validateNonce(t, m.PowPerOpBlock) == false {
-			return errors.New("The given OPBlock does not have the right difficulty")
+			return errors.New("validateBlock: OPBlock " + t.hash() + " does not have the right difficulty")
 		}
 		// Check that the previous block hash points to a legal, previously generated, block.
 		if _, ok := m.chain.Load(t.PrevHash); !ok {
-			return errors.New("The given OPBlock does not have a previous block")
+			return errors.New("validateBlock: OPBlock " + t.hash() + " does not have a previous block")
 		}
 
 		// Operation validations:
@@ -320,9 +320,9 @@ func (m *Miner) validateBlock(block Block) error {
 		for minerID, balanceRequired := range balanceRequiredMap {
 			balance, err := m.getBalance(t, minerID)
 			if err != nil {
-				return errors.New("Checking balanceRequired:" + err.Error())
+				return errors.New("validateBlock: checking balanceRequired:" + err.Error())
 			} else if balance < balanceRequired {
-				return errors.New("The miner of the OperationRecord does not have enough balance")
+				return errors.New("validateBlock: the miner" + minerID + "of the OperationRecord does not have enough balance")
 			}
 		}
 
@@ -336,18 +336,18 @@ func (m *Miner) validateBlock(block Block) error {
 		break
 	case NOPBlock:
 		if validateNonce(t, m.PowPerNoOpBlock) == false {
-			return errors.New("The given NOPBlock does not have the right difficulty")
+			return errors.New("validateBlock: NOPBlock " + t.hash() + " does not have the right difficulty")
 		}
 		// Check that the previous block hash points to a legal, previously generated, block.
 		if _, ok := m.chain.Load(t.PrevHash); ok {
-			fmt.Println("NOPBlock: the previous block is:", t.prevHash())
+			fmt.Println("validateBlock: the previous block of this NOPBlock is:", t.prevHash())
 		} else {
-			return errors.New("The given NOPBlock does not have a previous block")
+			return errors.New("validateBlock: NOPBlock " + t.hash() + " does not have a previous block")
 		}
 		break
 	case GenesisBlock:
 		if _, ok := m.chain.Load(m.GenesisBlockHash); ok {
-			return errors.New("A GenesisBlock already existed")
+			return errors.New("validateBlock: a GenesisBlock already existed")
 		}
 	}
 	// check duplicate blocks (currently done in addBlock)
@@ -775,7 +775,6 @@ func (m *Miner) computeNOPBlock() {
 			if validateNonce(nopBlock, m.PowPerNoOpBlock) == true {
 				log.Println("Generated NOPBlock", nopBlock.hash())
 				m.GeneratedBlocksChan <- nopBlock
-				log.Println("Going to return")
 				return
 			}
 			// log.Println("Generated failed NOPBlock", nopBlock.hash())
@@ -862,13 +861,23 @@ func (m *Miner) generateBlocks() {
 			}
 		case generatedBlock := <-m.GeneratedBlocksChan:
 			log.Println("generateBlocks: received the generated block")
+			if err := m.addBlock(generatedBlock); err != nil {
+				log.Println("generateBlocks: ", err)
+				if generatingNOPBlock {
+					generatingNOPBlock = false
+				}
+				if generatingOPBlock {
+					generatingOPBlock = false
+				}
+				break
+			}
 			switch generatedBlock.(type) {
 			case NOPBlock:
-				log.Println("generateBlocks: received the generated NOPBlock")
+				log.Println("generateBlocks: received the generated NOPBlock", generatedBlock.hash())
 				generatingNOPBlock = false
 				go m.broadcastBlock(generatedBlock)
 			case OPBlock:
-				log.Println("generateBlocks: received the generated OPBlock")
+				log.Println("generateBlocks: received the generated OPBlock", generatedBlock.hash())
 				generatingOPBlock = false
 				go m.broadcastBlock(generatedBlock)
 			default:
@@ -902,6 +911,7 @@ func (m *Miner) generateBlocks() {
 	}
 }
 
+// broadcastBlock broadcasts the block to all connected miners
 func (m *Miner) broadcastBlock(block Block) error {
 	calls := make([]*rpc.Call, 0, 100)
 	errStrings := make([]string, 0, 100)
