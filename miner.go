@@ -191,14 +191,14 @@ type Settings struct {
 
 // ClientAPI is the set of RPC calls provided to RFS
 type ClientAPI struct {
-	miner               *Miner // A reference to the current miner
-	incomingClientsAddr string // The local IP:port where this miner should expect to receive connections from RFS clients
+	miner      *Miner // A reference to the current miner
+	listenAddr string // The local IP:port where this miner should expect to receive connections from RFS clients
 }
 
 // MinerAPI is the set of RPC calls provided to other miners
 type MinerAPI struct {
-	miner              *Miner // A reference to the current miner
-	incomingMinersAddr string // The local IP:port where the miner should expect other miners to connect to it
+	miner      *Miner // A reference to the current miner
+	listenAddr string // The local IP:port where the miner should expect other miners to connect to it
 }
 
 // GetChainTips RPC provides the active starting point of the current blockchain
@@ -257,19 +257,22 @@ func (m *Miner) validateRecordSemantics(block Block, opRecord OperationRecord) e
 	for block.hash() != block.prevHash() {
 		prevBlock, ok := m.chain.Load(block.prevHash())
 		if !ok {
-			return errors.New("Encountered an orphaned block when checking RFS semantics")
+			return errors.New("validateRecordSemantics: encountered an orphaned block when checking RFS semantics")
 		}
 		switch t := block.(type) {
 		case NOPBlock:
 			break
 		case OPBlock:
-			if opRecord.OperationType == "create" {
+			switch opRecord.OperationType {
+			case "delete":
+				break
+			case "create":
 				for _, prevRecord := range t.Records {
 					if prevRecord.FileName == opRecord.FileName {
-						return errors.New("The given file name already exists in this chain")
+						return errors.New("validateRecordSemantics: file name " + opRecord.FileName + " already exists in this chain")
 					}
 				}
-			} else if opRecord.OperationType == "append" {
+			case "append":
 				for _, prevRecord := range t.Records {
 					if currentRecordNum == prevRecord.RecordNum+1 {
 						currentRecordNum = prevRecord.RecordNum
@@ -278,14 +281,14 @@ func (m *Miner) validateRecordSemantics(block Block, opRecord OperationRecord) e
 							return nil
 						}
 					} else {
-						return errors.New("Encountered an invalid OperationRecord (inserted into the middled of an rfs file)")
+						return errors.New("validateRecordSemantics: encountered (inserted into the middled of an rfs file)")
 					}
 				}
-			} else {
-				return errors.New("Encountered an invalid OperationRecord Type")
+			default:
+				return errors.New("validateRecordSemantics: encountered an invalid OperationRecord Type")
 			}
 		default:
-			return errors.New("Encountered an invalid intermediate block when checking RFS semantics")
+			return errors.New("validateRecordSemantics: encountered an invalid intermediate block")
 		}
 		block = prevBlock.(Block)
 	}
@@ -362,10 +365,11 @@ func (m *Miner) validateBlock(block Block) error {
 // if the mined coins are sufficient to cover the cost
 func (mapi *MinerAPI) SubmitRecord(operationRecord *OperationRecord, received *bool) error {
 	*received = true
+	funcName := "MinerAPI.SubmitRecord: "
 	block := mapi.miner.getBlockFromLongestChain()
 	balance, err := mapi.miner.getBalance(block, operationRecord.MinerID)
 	if err != nil {
-		return errors.New("Checking balanceRequired:" + err.Error())
+		return errors.New(funcName + "checking balanceRequired:" + err.Error())
 	}
 	err = mapi.miner.validateRecordSemantics(block, *operationRecord)
 	if err != nil {
@@ -376,11 +380,11 @@ func (mapi *MinerAPI) SubmitRecord(operationRecord *OperationRecord, received *b
 		break
 	case "create":
 		if uint32(mapi.miner.NumCoinsPerFileCreate) > balance {
-			return errors.New("The current balance is not enough to cover create")
+			return errors.New(funcName + "the current balance is not enough to cover create")
 		}
 	case "append":
 		if balance < 1 {
-			return errors.New("The current balance is not enough to cover append")
+			return errors.New(funcName + "the current balance is not enough to cover append")
 		}
 	}
 	mapi.miner.OperationRecordChan <- *operationRecord
@@ -393,9 +397,10 @@ func (mapi *MinerAPI) SubmitRecord(operationRecord *OperationRecord, received *b
 func (capi *ClientAPI) SubmitRecord(operationRecord *OperationRecord, received *bool) error {
 	block := capi.miner.getBlockFromLongestChain()
 	*received = true
+	funcName := "ClientAPI.SubmitRecord: "
 	balance, err := capi.miner.getBalance(block, capi.miner.MinerID)
 	if err != nil {
-		return errors.New("Checking balanceRequired:" + err.Error())
+		return errors.New(funcName + "checking balanceRequired:" + err.Error())
 	}
 	err = capi.miner.validateRecordSemantics(block, *operationRecord)
 	if err != nil {
@@ -406,11 +411,11 @@ func (capi *ClientAPI) SubmitRecord(operationRecord *OperationRecord, received *
 		break
 	case "create":
 		if uint32(capi.miner.NumCoinsPerFileCreate) > balance {
-			return errors.New("The current balance is not enough to cover create")
+			return errors.New(funcName + "the current balance is not enough to cover create")
 		}
 	case "append":
 		if balance < 1 {
-			return errors.New("The current balance is not enough to cover create or append")
+			return errors.New(funcName + "the current balance is not enough to cover create or append")
 		}
 	}
 	capi.miner.OperationRecordChan <- *operationRecord
@@ -420,10 +425,11 @@ func (capi *ClientAPI) SubmitRecord(operationRecord *OperationRecord, received *
 
 func (m *Miner) getOperationRecordHeight(block Block, srcRecord OperationRecord) (int, error) {
 	confirmedBlocksNum := 0
+	funcName := "getOperationRecordHeight: "
 	for block.hash() != block.prevHash() {
 		switch t := block.(type) {
 		default:
-			return -1, errors.New("Invalid Block Type")
+			return -1, errors.New(funcName + "invalid Block Type")
 		case OPBlock:
 			for _, dstRecord := range t.Records {
 				if cmp.Equal(srcRecord, dstRecord) {
@@ -436,10 +442,10 @@ func (m *Miner) getOperationRecordHeight(block Block, srcRecord OperationRecord)
 		}
 		// Check that the previous block hash points to a legal, previously generated, block.
 		if block, ok := m.chain.Load(block.prevHash()); !ok {
-			return -1, errors.New("Block" + block.(Block).hash() + "does not have a valid prevBlock")
+			return -1, errors.New(funcName + "block" + block.(Block).hash() + "does not have a valid prevBlock")
 		}
 	}
-	return -1, errors.New("The given OperationRecord cannot be found in the chain")
+	return -1, errors.New(funcName + "the given OperationRecord cannot be found in the chain")
 }
 
 // ConfirmOperation RPC should be invoked by the RFS Client
@@ -1054,12 +1060,12 @@ func main() {
 
 	// Register RPC methods for other miners to call.
 	minerAPI := new(MinerAPI)
-	minerAPI.incomingMinersAddr = miner.IncomingMinersAddr
+	minerAPI.listenAddr = miner.IncomingMinersAddr
 	minerAPI.miner = &miner
 
 	minerServer := rpc.NewServer()
 	minerServer.Register(minerAPI)
-	l, e := net.Listen("tcp", minerAPI.incomingMinersAddr)
+	l, e := net.Listen("tcp", minerAPI.listenAddr)
 	if e != nil {
 		log.Fatal("listen error:", e)
 	}
@@ -1075,12 +1081,12 @@ func main() {
 
 	// Register RPC methods for clients to call
 	clientAPI := new(ClientAPI)
-	clientAPI.incomingClientsAddr = miner.IncomingClientsAddr
+	clientAPI.listenAddr = miner.IncomingClientsAddr
 	clientAPI.miner = &miner
 
 	clientServer := rpc.NewServer()
 	clientServer.Register(clientAPI)
-	l, e = net.Listen("tcp", clientAPI.incomingClientsAddr)
+	l, e = net.Listen("tcp", clientAPI.listenAddr)
 	if e != nil {
 		log.Fatal("listen error:", e)
 	}
