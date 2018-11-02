@@ -5,7 +5,7 @@
     "GenOpBlockTimeout": 5,
     "GenesisBlockHash": "83218ac34c1834c26781fe4bde918ee4",
     "PowPerOpBlock": 4,
-    "PowPerNoOpBlock": 3,
+    "PowPerNoOpBlock": 5,
     "ConfirmsPerFileCreate": 2,
     "ConfirmsPerFileAppend": 4,
     "MinerID": "Mijnwerker",
