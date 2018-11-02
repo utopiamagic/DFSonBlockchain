@@ -384,7 +384,20 @@ func (mapi *MinerAPI) SubmitRecord(operationRecord *rfslib.OperationRecord, rece
 	return nil
 }
 
-// SubmitRecord RPC call from ClientAPI submits operationRecord to the miner network
+// ReadRecord RPC (call from ClientAPI) makes a best effort read and returns the closet matching OperationRecord
+// it only returns an error if the given file cannot be found or if it encounters an internal error
+func (capi *ClientAPI) ReadRecord(recordInfo *rfslib.OperationRecord, matchingRecord *rfslib.OperationRecord) error {
+	fname := recordInfo.FileName
+	recordNum := recordInfo.RecordNum
+	opRecord, err := capi.miner.readRecord(fname, recordNum)
+	if err != nil {
+		return err
+	}
+	*matchingRecord = opRecord
+	return nil
+}
+
+// SubmitRecord RPC (call from ClientAPI) submits operationRecord to the miner network
 // if the mined coins are sufficient to cover the cost
 func (capi *ClientAPI) SubmitRecord(operationRecord *rfslib.OperationRecord, received *bool) error {
 	block := capi.miner.getBlockFromLongestChain()
@@ -482,6 +495,7 @@ func (capi *ClientAPI) GetBalance(caller string, currentBalance *uint32) error {
 func (m *Miner) listFiles() ([]string, error) {
 	fnamesMap := make(map[string]bool)
 	fnamesSlice := make([]string, 0, 100)
+	confirmedBlocksNum := 0
 	block := m.getBlockFromLongestChain()
 	funcName := "listFiles: "
 	for block.hash() != block.prevHash() {
@@ -489,12 +503,13 @@ func (m *Miner) listFiles() ([]string, error) {
 		if !ok {
 			return fnamesSlice, errors.New(funcName + "encountered an orphaned block" + block.hash())
 		}
+		confirmedBlocksNum++
 		switch t := block.(type) {
 		case NOPBlock:
 			break
 		case OPBlock:
 			for _, opRecord := range t.Records {
-				if opRecord.OperationType == "create" {
+				if opRecord.OperationType == "create" && int(m.ConfirmsPerFileCreate) < confirmedBlocksNum {
 					fnamesMap[opRecord.FileName] = true
 				}
 			}
@@ -518,7 +533,7 @@ func (m *Miner) countRecords(fname string) (uint16, error) {
 		if !ok {
 			return 0, errors.New("countRecords: encountered an orphaned block when counting records")
 		}
-		confirmedBlocksNum += 1
+		confirmedBlocksNum++
 		switch t := block.(type) {
 		case NOPBlock:
 			break
@@ -549,6 +564,52 @@ func (m *Miner) countRecords(fname string) (uint16, error) {
 		block = prevBlock.(Block)
 	}
 	return 0, rfslib.FileDoesNotExistError(fmt.Sprintf("miner with id %s could not find file %s\n", m.MinerID, fname))
+}
+
+// readRecord returns the closet matching record to the request record if file can be found and error otherwise
+// (will make the best effort and parameter recordNum will be greater than or equals to that of returned record)
+func (m *Miner) readRecord(fname string, recordNum uint16) (rfslib.OperationRecord, error) {
+	block := m.getBlockFromLongestChain()
+	var invalidOpRecord rfslib.OperationRecord
+	funcName := "countRecords: "
+	confirmedBlocksNum := 0
+	for block.hash() != block.prevHash() {
+		prevBlock, ok := m.chain.Load(block.prevHash())
+		if !ok {
+			return invalidOpRecord, errors.New(funcName + "encountered an orphaned block when counting records")
+		}
+		confirmedBlocksNum++
+		switch t := block.(type) {
+		case NOPBlock:
+			break
+		case OPBlock:
+			for _, opRecord := range t.Records {
+				if opRecord.FileName == fname {
+					switch opRecord.OperationType {
+					default:
+						break
+					case "create":
+						// if we can find the header of the file and the header is confirmed...
+						// (observation: if we are here then the appended blocks are not confirmed yet)
+						if opRecord.FileName == fname && int(m.ConfirmsPerFileCreate) < confirmedBlocksNum {
+							return opRecord, nil
+						}
+					case "append":
+						// if we can find the tail record of the file
+						if opRecord.FileName == fname && int(m.ConfirmsPerFileAppend) < confirmedBlocksNum {
+							if recordNum == opRecord.RecordNum {
+								return opRecord, nil
+							}
+						}
+					}
+				}
+			}
+		default:
+			return invalidOpRecord, errors.New(funcName + "encountered an invalid intermediate block")
+		}
+		block = prevBlock.(Block)
+	}
+	return invalidOpRecord, rfslib.FileDoesNotExistError(fmt.Sprintf("miner with id %s could not find file %s\n", m.MinerID, fname))
 }
 
 // ListFiles RPC lists all files in the local chain
