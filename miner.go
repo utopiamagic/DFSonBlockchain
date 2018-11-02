@@ -254,10 +254,11 @@ func (mapi *MinerAPI) GetPeerInfo(caller string, minerID *string) error {
 // (e.g., a record is not mutated or inserted into the middled of an rfs file).
 func (m *Miner) validateRecordSemantics(block Block, opRecord OperationRecord) error {
 	currentRecordNum := opRecord.RecordNum
+	funcName := "validateRecordSemantics: "
 	for block.hash() != block.prevHash() {
 		prevBlock, ok := m.chain.Load(block.prevHash())
 		if !ok {
-			return errors.New("validateRecordSemantics: encountered an orphaned block when checking RFS semantics")
+			return errors.New(funcName + "encountered an orphaned block when checking RFS semantics")
 		}
 		switch t := block.(type) {
 		case NOPBlock:
@@ -269,7 +270,7 @@ func (m *Miner) validateRecordSemantics(block Block, opRecord OperationRecord) e
 			case "create":
 				for _, prevRecord := range t.Records {
 					if prevRecord.FileName == opRecord.FileName {
-						return errors.New("validateRecordSemantics: file name " + opRecord.FileName + " already exists in this chain")
+						return errors.New(funcName + "file name " + opRecord.FileName + " already exists in this chain")
 					}
 				}
 			case "append":
@@ -281,14 +282,14 @@ func (m *Miner) validateRecordSemantics(block Block, opRecord OperationRecord) e
 							return nil
 						}
 					} else {
-						return errors.New("validateRecordSemantics: encountered (inserted into the middled of an rfs file)")
+						return errors.New(funcName + "encountered (inserted into the middled of an rfs file)")
 					}
 				}
 			default:
-				return errors.New("validateRecordSemantics: encountered an invalid OperationRecord Type")
+				return errors.New(funcName + "encountered an invalid OperationRecord Type")
 			}
 		default:
-			return errors.New("validateRecordSemantics: encountered an invalid intermediate block")
+			return errors.New(funcName + "encountered an invalid intermediate block " + block.hash())
 		}
 		block = prevBlock.(Block)
 	}
@@ -489,10 +490,11 @@ func (m *Miner) listFiles() ([]string, error) {
 	fnamesMap := make(map[string]bool)
 	fnamesSlice := make([]string, 0, 100)
 	block := m.getBlockFromLongestChain()
+	funcName := "listFiles: "
 	for block.hash() != block.prevHash() {
 		prevBlock, ok := m.chain.Load(block.prevHash())
 		if !ok {
-			return fnamesSlice, errors.New("Encountered an orphaned block when finding files")
+			return fnamesSlice, errors.New(funcName + "encountered an orphaned block" + block.hash())
 		}
 		switch t := block.(type) {
 		case NOPBlock:
@@ -504,7 +506,7 @@ func (m *Miner) listFiles() ([]string, error) {
 				}
 			}
 		default:
-			return fnamesSlice, errors.New("Encountered an invalid intermediate block when finding files")
+			return fnamesSlice, errors.New(funcName + "encountered an invalid intermediate block" + block.hash())
 		}
 		block = prevBlock.(Block)
 	}
@@ -998,6 +1000,7 @@ func (m *Miner) initializeMiner(settings Settings) error {
 		client.Call("MinerAPI.GetPeerInfo", m.MinerID+":initializeChains", &remoteMinerID)
 		err = client.Call("MinerAPI.AddNode", PeerMinerInfo{m.IncomingMinersAddr, m.MinerID}, &status)
 		if err != nil || status != true {
+			log.Fatalln("initializeMiner: ", err)
 			// TODO: consider retry?
 		}
 		m.peerMiners.Store(remoteMinerID, client)
@@ -1075,7 +1078,7 @@ func main() {
 	//Access config and set timestamps (realtime) to true
 	config := govec.GetDefaultConfig()
 	config.UseTimestamps = true
-	logger := govec.InitGoVector("MinerProcess", "Miner", config)
+	logger := govec.InitGoVector("MinerProcess", "Miner-"+miner.MinerID, config)
 	miner.Logger = logger
 	go vrpc.ServeRPCConn(minerServer, l, logger, options)
 

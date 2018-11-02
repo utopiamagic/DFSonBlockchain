@@ -8,7 +8,7 @@
     "PowPerNoOpBlock": 5,
     "ConfirmsPerFileCreate": 2,
     "ConfirmsPerFileAppend": 4,
-    "MinerID": "Mijnwerker",
+    "MinerID": "Shakhtor",
     "PeerMinersAddrs": [],
     "IncomingMinersAddr": "127.0.0.1:8080",
     "OutgoingMinersIP": "127.0.0.1",
