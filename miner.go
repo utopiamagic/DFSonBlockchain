@@ -512,22 +512,39 @@ func (m *Miner) listFiles() ([]string, error) {
 func (m *Miner) countRecords(fname string) (uint16, error) {
 	// recordNum := 0
 	block := m.getBlockFromLongestChain()
+	confirmedBlocksNum := 0
 	for block.hash() != block.prevHash() {
 		prevBlock, ok := m.chain.Load(block.prevHash())
 		if !ok {
-			return 0, errors.New("Encountered an orphaned block when counting records")
+			return 0, errors.New("countRecords: encountered an orphaned block when counting records")
 		}
+		confirmedBlocksNum += 1
 		switch t := block.(type) {
 		case NOPBlock:
 			break
 		case OPBlock:
 			for _, opRecord := range t.Records {
 				if opRecord.FileName == fname {
-					return opRecord.RecordNum, nil
+					switch opRecord.OperationType {
+					default:
+						return 0, errors.New("countRecords: operation Type not recognized")
+					case "delete":
+						return 0, errors.New("countRecords: delete not supported")
+					case "create":
+						if int(m.ConfirmsPerFileCreate) < confirmedBlocksNum {
+							return 0, nil
+						}
+						return 0, nil
+					case "append":
+						if int(m.ConfirmsPerFileAppend) < confirmedBlocksNum {
+							return opRecord.RecordNum, nil
+						}
+						return 0, nil
+					}
 				}
 			}
 		default:
-			return 0, errors.New("Encountered an invalid intermediate block when counting records")
+			return 0, errors.New("countRecords: encountered an invalid intermediate block")
 		}
 		block = prevBlock.(Block)
 	}
@@ -839,7 +856,7 @@ func (m *Miner) computeOPBlock(records []rfslib.OperationRecord) {
 	}
 }
 
-// generateBlocks should only be called once
+// generateBlocks generates blocks continuously and should only be called once
 func (m *Miner) generateBlocks() {
 	opBlockTimer := time.NewTimer(0 * time.Millisecond)
 	if !opBlockTimer.Stop() {
