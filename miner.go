@@ -81,11 +81,11 @@ func (nopblock NOPBlock) minerID() string {
 
 // OPBlock is a OP Block with non-empty Records
 type OPBlock struct {
-	PrevHash     string            // A hash of the previous block in the chain (prev-hash)
-	Records      []OperationRecord // An ordered set of operation records
-	Nonce        uint32            // A 32-bit unsigned integer nonce (nonce)
-	MinerID      string            // The identifier of the miner that computed this block (block-minerID)
-	MinerBalance uint32            // The updated balance of the miner that computed this block
+	PrevHash     string                   // A hash of the previous block in the chain (prev-hash)
+	Records      []rfslib.OperationRecord // An ordered set of operation records
+	Nonce        uint32                   // A 32-bit unsigned integer nonce (nonce)
+	MinerID      string                   // The identifier of the miner that computed this block (block-minerID)
+	MinerBalance uint32                   // The updated balance of the miner that computed this block
 }
 
 func (opblock OPBlock) hash() string {
@@ -102,15 +102,6 @@ func (opblock OPBlock) minerID() string {
 	return opblock.MinerID
 }
 
-// OperationRecord is a file operation on the block chain
-type OperationRecord struct {
-	RecordData    rfslib.Record // rfslib operation data
-	OperationType string        // rfslib operation type (one of ["append", "create", "delete"])
-	FileName      string        // The name of file being operated
-	RecordNum     uint16        // The chunk number of the file
-	MinerID       string        // An identifier that specifies the miner identifier whose record coins sponsor this operation
-}
-
 // PeerMinerInfo is ...
 type PeerMinerInfo struct {
 	IncomingMinersAddr string
@@ -124,9 +115,9 @@ type Miner struct {
 	Logger       *govec.GoLog       // The GoVector Logger
 	GoVecOptions govec.GoLogOptions // The GoVector log options
 
-	GeneratedBlocksChan chan Block           // Channel of generated blocks
-	StopMiningChan      chan string          // Channel that stops computeOPBlock or computeNOPBlock
-	OperationRecordChan chan OperationRecord // Channel of valid operation records received from other miners
+	GeneratedBlocksChan chan Block                  // Channel of generated blocks
+	StopMiningChan      chan string                 // Channel that stops computeOPBlock or computeNOPBlock
+	OperationRecordChan chan rfslib.OperationRecord // Channel of valid operation records received from other miners
 
 	// No need to initialize :)
 	chain      sync.Map // {hash: Block} All the blocks in the network
@@ -252,7 +243,7 @@ func (mapi *MinerAPI) GetPeerInfo(caller string, minerID *string) error {
 
 // validateRecordSemantics checks that each operation does not violate RFS semantics
 // (e.g., a record is not mutated or inserted into the middled of an rfs file).
-func (m *Miner) validateRecordSemantics(block Block, opRecord OperationRecord) error {
+func (m *Miner) validateRecordSemantics(block Block, opRecord rfslib.OperationRecord) error {
 	currentRecordNum := opRecord.RecordNum
 	funcName := "validateRecordSemantics: "
 	for block.hash() != block.prevHash() {
@@ -362,9 +353,9 @@ func (m *Miner) validateBlock(block Block) error {
 	return nil
 }
 
-// SubmitRecord RPC from MinerAPI submits operationRecord to the miner network
+// SubmitRecord RPC from MinerAPI submits rfslib.OperationRecord to the miner network
 // if the mined coins are sufficient to cover the cost
-func (mapi *MinerAPI) SubmitRecord(operationRecord *OperationRecord, received *bool) error {
+func (mapi *MinerAPI) SubmitRecord(operationRecord *rfslib.OperationRecord, received *bool) error {
 	*received = true
 	funcName := "MinerAPI.SubmitRecord: "
 	block := mapi.miner.getBlockFromLongestChain()
@@ -395,7 +386,7 @@ func (mapi *MinerAPI) SubmitRecord(operationRecord *OperationRecord, received *b
 
 // SubmitRecord RPC call from ClientAPI submits operationRecord to the miner network
 // if the mined coins are sufficient to cover the cost
-func (capi *ClientAPI) SubmitRecord(operationRecord *OperationRecord, received *bool) error {
+func (capi *ClientAPI) SubmitRecord(operationRecord *rfslib.OperationRecord, received *bool) error {
 	block := capi.miner.getBlockFromLongestChain()
 	*received = true
 	funcName := "ClientAPI.SubmitRecord: "
@@ -412,19 +403,21 @@ func (capi *ClientAPI) SubmitRecord(operationRecord *OperationRecord, received *
 		break
 	case "create":
 		if uint32(capi.miner.NumCoinsPerFileCreate) > balance {
-			return errors.New(funcName + "the current balance is not enough to cover create")
+			return rfslib.ErrInsufficientCreateBalance{Have: int(balance), Need: int(capi.miner.NumCoinsPerFileCreate)}
 		}
 	case "append":
 		if balance < 1 {
-			return errors.New(funcName + "the current balance is not enough to cover create or append")
+			return rfslib.ErrInsufficientAppendBalance{Have: int(balance), Need: 1}
 		}
+		// Need to check for and return rfslib.FileMaxLenReachedError
+		// Need to set received to the position of the record appended (uint16)
 	}
 	capi.miner.OperationRecordChan <- *operationRecord
 	capi.miner.broadcastOperationRecord(operationRecord)
 	return nil
 }
 
-func (m *Miner) getOperationRecordHeight(block Block, srcRecord OperationRecord) (int, error) {
+func (m *Miner) getOperationRecordHeight(block Block, srcRecord rfslib.OperationRecord) (int, error) {
 	confirmedBlocksNum := 0
 	funcName := "getOperationRecordHeight: "
 	for block.hash() != block.prevHash() {
@@ -451,7 +444,7 @@ func (m *Miner) getOperationRecordHeight(block Block, srcRecord OperationRecord)
 
 // ConfirmOperation RPC should be invoked by the RFS Client
 // upon succesfully confimation it returns nil
-func (capi *ClientAPI) ConfirmOperation(operationRecord *OperationRecord, received *bool) error {
+func (capi *ClientAPI) ConfirmOperation(operationRecord *rfslib.OperationRecord, received *bool) error {
 	block := capi.miner.getBlockFromLongestChain()
 	*received = true
 	confirmedBlocksNum, err := capi.miner.getOperationRecordHeight(block, *operationRecord)
@@ -465,12 +458,12 @@ func (capi *ClientAPI) ConfirmOperation(operationRecord *OperationRecord, receiv
 		return errors.New("Delete not supported")
 	case "create":
 		if int(capi.miner.ConfirmsPerFileCreate) > confirmedBlocksNum {
-			return errors.New("Operation create not confirmed")
+			return rfslib.ErrCreateNotConfirmed
 		}
 		return nil
 	case "append":
 		if int(capi.miner.ConfirmsPerFileAppend) > confirmedBlocksNum {
-			return errors.New("Operation append not confirmed")
+			return rfslib.ErrAppendNotConfirmed
 		}
 		return nil
 	}
@@ -538,7 +531,7 @@ func (m *Miner) countRecords(fname string) (uint16, error) {
 		}
 		block = prevBlock.(Block)
 	}
-	return 0, errors.New("Cannot find the given file")
+	return 0, rfslib.FileDoesNotExistError(fmt.Sprintf("miner with id %s could not find file %s\n", m.MinerID, fname))
 }
 
 // ListFiles RPC lists all files in the local chain
@@ -795,7 +788,7 @@ func (m *Miner) computeNOPBlock() {
 	}
 }
 
-func (m *Miner) computeCoinsRequired(records []OperationRecord, minerID string) (int, error) {
+func (m *Miner) computeCoinsRequired(records []rfslib.OperationRecord, minerID string) (int, error) {
 	var coins int
 	for _, v := range records {
 		if v.MinerID == minerID {
@@ -815,7 +808,7 @@ func (m *Miner) computeCoinsRequired(records []OperationRecord, minerID string) 
 }
 
 // computeOPBlock works similarly except it takes all the records collected in the given time
-func (m *Miner) computeOPBlock(records []OperationRecord) {
+func (m *Miner) computeOPBlock(records []rfslib.OperationRecord) {
 	var nonce uint32
 	nonce = 1
 	prevBlock := m.getBlockFromLongestChain()
@@ -856,8 +849,8 @@ func (m *Miner) generateBlocks() {
 	m.StopMiningChan = make(chan string)
 	// m.NOPBlockStopChan = make(chan string)
 	m.GeneratedBlocksChan = make(chan Block)
-	m.OperationRecordChan = make(chan OperationRecord)
-	recordsMap := make(map[OperationRecord]bool)
+	m.OperationRecordChan = make(chan rfslib.OperationRecord)
+	recordsMap := make(map[rfslib.OperationRecord]bool)
 	generatingNOPBlock := false
 	generatingOPBlock := false
 	for {
@@ -910,7 +903,7 @@ func (m *Miner) generateBlocks() {
 			if generatingOPBlock {
 				m.StopMiningChan <- "generateBlocks(timedOut, OPBlock)"
 			}
-			records := make([]OperationRecord, 0, len(recordsMap))
+			records := make([]rfslib.OperationRecord, 0, len(recordsMap))
 			for k := range recordsMap {
 				records = append(records, k)
 			}
@@ -952,7 +945,7 @@ func (m *Miner) broadcastBlock(block Block) error {
 	return nil
 }
 
-func (m *Miner) broadcastOperationRecord(opRecord *OperationRecord) error {
+func (m *Miner) broadcastOperationRecord(opRecord *rfslib.OperationRecord) error {
 	calls := make(map[string]*rpc.Call)
 	failedCalls := make([]string, 0, 100)
 	m.peerMiners.Range(func(remoteMinerID, client interface{}) bool {
