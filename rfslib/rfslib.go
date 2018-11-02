@@ -31,14 +31,14 @@ type Record [512]byte
 // https://blog.golang.org/error-handling-and-go
 // https://blog.golang.org/errors-are-values
 
-// Contains minerAddr
+// DisconnectedError ... Contains minerAddr
 type DisconnectedError string
 
 func (e DisconnectedError) Error() string {
 	return fmt.Sprintf("RFS: Disconnected from the miner [%s]", string(e))
 }
 
-// Contains filename. The *only* constraint on filenames in RFS is
+// BadFilenameError ... contains filename. The *only* constraint on filenames in RFS is
 // that must be at most 64 bytes long.
 type BadFilenameError string
 
@@ -46,21 +46,21 @@ func (e BadFilenameError) Error() string {
 	return fmt.Sprintf("RFS: Filename [%s] has the wrong length", string(e))
 }
 
-// Contains filename
+// FileDoesNotExistError ... Contains filename.
 type FileDoesNotExistError string
 
 func (e FileDoesNotExistError) Error() string {
 	return fmt.Sprintf("RFS: Cannot open file [%s] in D mode as it does not exist locally", string(e))
 }
 
-// Contains filename
+// FileExistsError ... Contains filename
 type FileExistsError string
 
 func (e FileExistsError) Error() string {
 	return fmt.Sprintf("RFS: Cannot create file with filename [%s] as it already exists", string(e))
 }
 
-// Contains filename
+// FileMaxLenReachedError Contains filename
 type FileMaxLenReachedError string
 
 func (e FileMaxLenReachedError) Error() string {
@@ -69,6 +69,7 @@ func (e FileMaxLenReachedError) Error() string {
 
 // <CUSTOM ERROR DEFINITIONS>
 
+// ErrInsufficientCreateBalance ...
 type ErrInsufficientCreateBalance struct {
 	Have int
 	Need int
@@ -78,6 +79,7 @@ func (e ErrInsufficientCreateBalance) Error() string {
 	return fmt.Sprintf("Create: Insufficient balance: Have: %d, Need: %d", e.Have, e.Need)
 }
 
+// ErrInsufficientAppendBalance ...
 type ErrInsufficientAppendBalance struct {
 	Have int
 	Need int
@@ -100,7 +102,7 @@ var (
 // </ERROR DEFINITIONS>
 ////////////////////////////////////////////////////////////////////////////////////////////
 
-// Represents a connection to the RFS system.
+// RFS ... Represents a connection to the RFS system.
 type RFS interface {
 	// Creates a new empty RFS file with name fname.
 	// Requires record coins.
@@ -342,6 +344,8 @@ func (client *rfsClient) AppendRec(fname string, record *Record) (recordNum uint
 			}
 
 			switch e := err.(type) {
+			case FileDoesNotExistError:
+				return 0, e
 			case FileMaxLenReachedError:
 				return 0, e
 			case ErrInsufficientAppendBalance:
@@ -376,11 +380,11 @@ func (client *rfsClient) AppendRec(fname string, record *Record) (recordNum uint
 		}
 		break
 	}
-
 	// If we got this far, the operation was submitted and confirmed.
 	return pos, nil
 }
 
+// Initialize ...
 // The constructor for a new RFS object instance. Takes the miner's
 // IP:port address string as parameter, and the localAddr which is the
 // local IP:port to use to establish the connection to the miner.
