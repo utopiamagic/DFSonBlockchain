@@ -215,8 +215,9 @@ func (client *rfsClient) CreateFile(fname string) (err error) {
 				log.Println("Insufficient record coins to create file, trying again...")
 				continue
 			}
-			// If there was some other error, also just try again.
-			continue
+			// If there was some other error, file already exists.
+			return FileExistsError(fname)
+
 		}
 		break
 	}
@@ -236,8 +237,8 @@ func (client *rfsClient) CreateFile(fname string) (err error) {
 				log.Println("Operation not confirmed, trying again...")
 				continue
 			}
-			// If there was some other erorr, also just try again.
-			continue
+			// If there was some other error, file already exists.
+			return FileExistsError(fname)
 		}
 		break
 	}
@@ -249,8 +250,8 @@ func (client *rfsClient) CreateFile(fname string) (err error) {
 // ListFiles implements RFS.ListFiles.
 // See RFS.ListFiles.
 func (client *rfsClient) ListFiles() (fnames []string, err error) {
-	var reply []string
 	for {
+		var reply []string
 		err = client.Call("ClientAPI.ListFiles", client.localAddr, &reply)
 		if err != nil {
 			if err == rpc.ErrShutdown {
@@ -270,8 +271,8 @@ func (client *rfsClient) ListFiles() (fnames []string, err error) {
 // TotalRecs implements RFS.TotalRecs.
 // See RFS.TotalRecs.
 func (client *rfsClient) TotalRecs(fname string) (numRecs uint16, err error) {
-	var reply uint16
 	for {
+		var reply uint16
 		err = client.Call("ClientAPI.CountRecords", fname, &reply)
 		if err != nil {
 			if err == rpc.ErrShutdown {
@@ -298,35 +299,74 @@ func (client *rfsClient) TotalRecs(fname string) (numRecs uint16, err error) {
 // ReadRec implements RFS.ReadRec.
 // See RFS.ReadRec.
 func (client *rfsClient) ReadRec(fname string, recordNum uint16, record *Record) (err error) {
-	panic("not implemented")
-}
-
-// AppendRec implements RFS.AppendRec.
-// See RFS.AppendRec.
-func (client *rfsClient) AppendRec(fname string, record *Record) (recordNum uint16, err error) {
 
 	// Get all file names first, so we can make sure that
-	// fname doesn't already exist.
+	// fname exists.
 	fnames, err := client.ListFiles()
 	if err != nil {
 		if err == rpc.ErrShutdown {
 			// If the RPC connection was lost, return a rfslib.DisconnectedError.
-			return 0, DisconnectedError(fmt.Sprintf("client disconnected from miner at %s\n", client.minerAddr))
+			return DisconnectedError(fmt.Sprintf("client disconnected from miner at %s\n", client.minerAddr))
 		}
 	}
 
 	found := false
 	for _, fn := range fnames {
 		if fn == fname {
+			// This file exists!
 			found = true
 		}
 	}
 
 	if !found {
-		return 0, FileDoesNotExistError(fmt.Sprintf("file %s does not exist\n", fname))
+		return FileDoesNotExistError(fmt.Sprintf("file %s does not exist", fname))
 	}
 
-	// Create a create record.
+	// Read the record in fname at recordNum
+	op := OperationRecord{
+		FileName:  fname,
+		RecordNum: recordNum,
+	}
+
+	for {
+		var res *OperationRecord
+		err = client.Call("ClientAPI.ReadRecord", op, &res)
+		if err != nil {
+			if err == rpc.ErrShutdown {
+				// If the RPC connection was lost, return a rfslib.DisconnectedError.
+				return DisconnectedError(fmt.Sprintf("client disconnected from miner at %s\n", client.minerAddr))
+			}
+			// On some other error, just try again.
+			continue
+		}
+
+		if recordNum == res.RecordNum {
+			// We found the corrent record.  Read the data into
+			// the record pointer and return.
+			*record = res.RecordData
+			return
+		}
+		// Otherwise, we got an incorrent record.  This probably means
+		// that recordNum has not been confirmed yet.  Just try again.
+	}
+}
+
+// AppendRec implements RFS.AppendRec.
+// See RFS.AppendRec.
+
+// Appends a new record to a file with name fname with the
+// contents pointed to by record. Returns the position of the
+// record that was just appended as recordNum. Returns a non-nil
+// error if the operation was unsuccessful.
+// Requires record coins.
+//
+// Can return the following errors:
+// - DisconnectedError
+// - FileDoesNotExistError
+// - FileMaxLenReachedError
+func (client *rfsClient) AppendRec(fname string, record *Record) (recordNum uint16, err error) {
+
+	// Create an append record.
 	op := OperationRecord{
 		OperationType: "append",
 		FileName:      fname,
@@ -343,11 +383,7 @@ func (client *rfsClient) AppendRec(fname string, record *Record) (recordNum uint
 				return 0, DisconnectedError(fmt.Sprintf("client disconnected from miner at %s\n", client.minerAddr))
 			}
 
-			switch e := err.(type) {
-			case FileDoesNotExistError:
-				return 0, e
-			case FileMaxLenReachedError:
-				return 0, e
+			switch err.(type) {
 			case ErrInsufficientAppendBalance:
 				// If we don't have enough record coins to append to the file, try again until we do.
 				log.Println("Insufficient record coins to append to file, trying again...")
@@ -401,10 +437,8 @@ func Initialize(localAddr string, minerAddr string) (rfs RFS, err error) {
 		return nil, DisconnectedError(minerAddr)
 	}
 	return &rfsClient{
-		Client:         client,
-		localAddr:      localAddr,
-		minerAddr:      minerAddr,
-		appendCoinCost: 1,
-		createCoinCost: -1,
+		Client:    client,
+		localAddr: localAddr,
+		minerAddr: minerAddr,
 	}, nil
 }

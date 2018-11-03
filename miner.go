@@ -422,8 +422,6 @@ func (capi *ClientAPI) SubmitRecord(operationRecord *rfslib.OperationRecord, rec
 		if balance < 1 {
 			return rfslib.ErrInsufficientAppendBalance{Have: int(balance), Need: 1}
 		}
-		// Need to check for and return rfslib.FileMaxLenReachedError
-		// Need to set received to the position of the record appended (uint16)
 	}
 	capi.miner.OperationRecordChan <- *operationRecord
 	capi.miner.broadcastOperationRecord(operationRecord)
