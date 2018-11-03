@@ -15,6 +15,9 @@ import (
 	"fmt"
 	"log"
 	"net/rpc"
+
+	"github.com/DistributedClocks/GoVector/govec"
+	"github.com/DistributedClocks/GoVector/govec/vrpc"
 )
 
 // A Record is the unit of file access (reading/appending) in RFS.
@@ -505,7 +508,14 @@ func (client *rfsClient) AppendRec(fname string, record *Record) (recordNum uint
 // succeeds. This call can return the following errors:
 // - Networking errors related to localAddr or minerAddr
 func Initialize(localAddr string, minerAddr string) (rfs RFS, err error) {
-	client, err := rpc.Dial("tcp", minerAddr)
+	//Initalize GoVector
+	options := govec.GetDefaultLogOptions()
+	//Access config and set timestamps (realtime) to true
+	config := govec.GetDefaultConfig()
+	config.UseTimestamps = true
+	logger := govec.InitGoVector("Client", "clientlog", config)
+
+	client, err := vrpc.RPCDial("tcp", minerAddr, logger, options)
 	if err != nil {
 		log.Println(err)
 		return nil, DisconnectedError(minerAddr)
