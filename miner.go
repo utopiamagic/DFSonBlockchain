@@ -355,19 +355,22 @@ func (m *Miner) validateBlock(block Block) error {
 
 // SubmitRecord RPC from MinerAPI submits rfslib.OperationRecord to the miner network
 // if the mined coins are sufficient to cover the cost
-func (mapi *MinerAPI) SubmitRecord(operationRecord *rfslib.OperationRecord, received *bool) error {
-	*received = true
+func (mapi *MinerAPI) SubmitRecord(newOpRecord *rfslib.OperationRecord, nextRecordNum *uint16) error {
 	funcName := "MinerAPI.SubmitRecord: "
 	block := mapi.miner.getBlockFromLongestChain()
-	balance, err := mapi.miner.getBalance(block, operationRecord.MinerID)
+	balance, err := mapi.miner.getBalance(block, newOpRecord.MinerID)
 	if err != nil {
 		return errors.New(funcName + "checking balanceRequired:" + err.Error())
 	}
-	err = mapi.miner.validateRecordSemantics(block, *operationRecord)
+	// err = mapi.miner.validateRecordSemantics(block, *operationRecord)
+	// We assume that the previous records are confirmed before a client append a new one
+	mostRecentRecord, err := mapi.miner.readRecord(newOpRecord.FileName, 65535)
 	if err != nil {
 		return err
 	}
-	switch operationRecord.OperationType {
+	newOpRecord.RecordNum = mostRecentRecord.RecordNum + 1
+	*nextRecordNum = newOpRecord.RecordNum
+	switch newOpRecord.OperationType {
 	case "delete":
 		break
 	case "create":
@@ -379,8 +382,8 @@ func (mapi *MinerAPI) SubmitRecord(operationRecord *rfslib.OperationRecord, rece
 			return errors.New(funcName + "the current balance is not enough to cover append")
 		}
 	}
-	mapi.miner.OperationRecordChan <- *operationRecord
-	mapi.miner.broadcastOperationRecord(operationRecord)
+	mapi.miner.OperationRecordChan <- *newOpRecord
+	mapi.miner.broadcastOperationRecord(newOpRecord)
 	return nil
 }
 
@@ -571,7 +574,7 @@ func (m *Miner) countRecords(fname string) (uint16, error) {
 func (m *Miner) readRecord(fname string, recordNum uint16) (rfslib.OperationRecord, error) {
 	block := m.getBlockFromLongestChain()
 	var invalidOpRecord rfslib.OperationRecord
-	funcName := "countRecords: "
+	funcName := "readRecord: "
 	confirmedBlocksNum := 0
 	for block.hash() != block.prevHash() {
 		prevBlock, ok := m.chain.Load(block.prevHash())
@@ -597,7 +600,7 @@ func (m *Miner) readRecord(fname string, recordNum uint16) (rfslib.OperationReco
 					case "append":
 						// if we can find the tail record of the file
 						if opRecord.FileName == fname && int(m.ConfirmsPerFileAppend) < confirmedBlocksNum {
-							if recordNum == opRecord.RecordNum {
+							if recordNum >= opRecord.RecordNum {
 								return opRecord, nil
 							}
 						}
