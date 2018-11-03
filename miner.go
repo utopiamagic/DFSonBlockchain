@@ -982,7 +982,6 @@ func (m *Miner) generateBlocks() {
 				generatingNOPBlock = true
 			}
 		case generatedBlock := <-m.GeneratedBlocksChan:
-			log.Println("generateBlocks: received the generated block")
 			if err := m.addBlock(generatedBlock); err != nil {
 				log.Println("generateBlocks: ", err)
 				if generatingNOPBlock {
@@ -993,13 +992,13 @@ func (m *Miner) generateBlocks() {
 				}
 				break
 			}
-			switch generatedBlock.(type) {
+			switch t := generatedBlock.(type) {
 			case NOPBlock:
-				log.Println("generateBlocks: received the generated NOPBlock", generatedBlock.hash())
+				log.Println("generateBlocks: received the generated NOPBlock", t.hash(), "with balance", t.MinerBalance)
 				generatingNOPBlock = false
 				go m.broadcastBlock(generatedBlock)
 			case OPBlock:
-				log.Println("generateBlocks: received the generated OPBlock", generatedBlock.hash())
+				log.Println("generateBlocks: received the generated OPBlock", t.hash(), "with balance", t.MinerBalance
 				generatingOPBlock = false
 				go m.broadcastBlock(generatedBlock)
 			default:
