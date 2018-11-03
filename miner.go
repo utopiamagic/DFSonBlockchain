@@ -756,7 +756,6 @@ func (m *Miner) updateChainTip(newBlock Block) error {
 
 // getBalance finds the current balance along the chain starting
 func (m *Miner) getBalance(block Block, minerID string) (uint32, error) {
-	foundBalance := false
 	var mostRecentBalance uint32
 	var recentTrasactionFee uint32
 	for block.hash() != block.prevHash() {
@@ -764,12 +763,12 @@ func (m *Miner) getBalance(block Block, minerID string) (uint32, error) {
 		case NOPBlock:
 			if t.MinerID == minerID {
 				mostRecentBalance = t.MinerBalance
+				return mostRecentBalance - recentTrasactionFee, nil
 			}
 		case OPBlock:
 			if t.MinerID == minerID {
 				mostRecentBalance = t.MinerBalance
-				foundBalance = true
-				break
+				return mostRecentBalance - recentTrasactionFee, nil
 			}
 			for _, record := range t.Records {
 				if record.MinerID == minerID {
@@ -792,9 +791,6 @@ func (m *Miner) getBalance(block Block, minerID string) (uint32, error) {
 		} else {
 			return 0, errors.New("getBalance: this chain does not have a valid head")
 		}
-	}
-	if foundBalance {
-		return mostRecentBalance - recentTrasactionFee, nil
 	}
 	return 0, nil
 }
