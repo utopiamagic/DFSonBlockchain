@@ -92,6 +92,13 @@ func (e ErrInsufficientAppendBalance) Error() string {
 	return fmt.Sprintf("Append: Insufficient balance: Have: %d, Need: %d", e.Have, e.Need)
 }
 
+// MinerRes ...
+type MinerRes struct {
+	Data   interface{}
+	HasErr bool
+	Error  error
+}
+
 var (
 	// ErrCreateNotConfirmed denotes that a create file operation has not yet been confirmed
 	ErrCreateNotConfirmed = errors.New("Create file not confirmed")
@@ -210,8 +217,9 @@ func (client *rfsClient) CreateFile(fname string) (err error) {
 	// First, block until we have enough record coins.
 	for {
 		log.Println("submitting create file record to miner...")
-		var received bool
-		err = client.Call("ClientAPI.SubmitRecord", op, &received)
+		var minerRes MinerRes
+
+		err = client.Call("ClientAPI.SubmitRecord", op, &minerRes)
 		if err != nil {
 			if err == rpc.ErrShutdown {
 				// If the RPC connection was lost, return a rfslib.DisconnectedError.
@@ -219,17 +227,22 @@ func (client *rfsClient) CreateFile(fname string) (err error) {
 				log.Println(err)
 				return DisconnectedError(fmt.Sprintf("client disconnected from miner at %s\n", client.minerAddr))
 			}
+			log.Println("received unexpected server err, trying again")
+			log.Println(err)
+			continue
+		}
 
+		if hasErr, err := minerRes.HasErr, minerRes.Error; hasErr {
 			if err, ok := err.(ErrInsufficientCreateBalance); ok {
 				// If we don't have enough record coins to create the file, try again until we do.
 				log.Println("Insufficient record coins to create file, trying again...")
 				log.Println(err)
 				continue
 			}
-			// If there was some other error, file already exists.
-			log.Println("miner encountered some other error, treat as FileExistsError")
+			// There was some other error returned by the miner, continue.
+			log.Println("received unexpected server err, trying again")
 			log.Println(err)
-			return FileExistsError(fname)
+			continue
 		}
 		break
 	}
@@ -239,8 +252,8 @@ func (client *rfsClient) CreateFile(fname string) (err error) {
 	// Now, block until the transaction is confirmed.
 	for {
 		log.Println("waiting until transaction is confirmed...")
-		var received bool
-		err = client.Call("ClientAPI.ConfirmOperation", op, &received)
+		var minerRes MinerRes
+		err = client.Call("ClientAPI.ConfirmOperation", op, &minerRes)
 		if err != nil {
 			if err == rpc.ErrShutdown {
 				// If the RPC connection was lost, return a rfslib.DisconnectedError.
@@ -248,17 +261,22 @@ func (client *rfsClient) CreateFile(fname string) (err error) {
 				log.Println(err)
 				return DisconnectedError(fmt.Sprintf("client disconnected from miner at %s\n", client.minerAddr))
 			}
+			log.Println("received unexpected server err, trying again")
+			log.Println(err)
+			continue
+		}
 
+		if hasErr, err := minerRes.HasErr, minerRes.Error; hasErr {
 			if err == ErrCreateNotConfirmed {
 				// We're not confirmed yet, try again until we are.
 				log.Println("Operation not confirmed, trying again...")
 				log.Println(err)
 				continue
 			}
-			// If there was some other error, file already exists.
-			log.Println("miner encountered some other error, treat as FileExistsError")
+			// There was some other error returned by the miner, continue.
+			log.Println("received unexpected server err, trying again")
 			log.Println(err)
-			return FileExistsError(fname)
+			continue
 		}
 		break
 	}
@@ -298,33 +316,35 @@ func (client *rfsClient) ListFiles() (fnames []string, err error) {
 func (client *rfsClient) TotalRecs(fname string) (numRecs uint16, err error) {
 	for {
 		log.Printf("asking miner to count all records in file %s...\n", fname)
-		var reply uint16
-		err = client.Call("ClientAPI.CountRecords", fname, &reply)
+		var minerRes MinerRes
+		err = client.Call("ClientAPI.CountRecords", fname, &minerRes)
 		if err != nil {
 			if err == rpc.ErrShutdown {
 				// If the RPC connection was lost, return a rfslib.DisconnectedError.
 				log.Printf("connection to miner at address %s was lost, returning DisconnectedError\n", client.minerAddr)
 				log.Println(err)
-				return reply, DisconnectedError(fmt.Sprintf("client disconnected from miner at %s\n", client.minerAddr))
+				return 0, DisconnectedError(fmt.Sprintf("client disconnected from miner at %s\n", client.minerAddr))
 			}
+			log.Println("miner encountered some other error, try again")
+			log.Println(err)
+			continue
+		}
 
+		if hasErr, err := minerRes.HasErr, minerRes.Error; hasErr {
 			if e, ok := err.(FileDoesNotExistError); ok {
 				// If the file does not exist (according to our miner connection),
 				// return FileDoesNotExistError.
 				log.Printf("file %s does not exist, returning FileDoesNotExistError\n", fname)
 				log.Println(e)
-				return reply, e
+				return 0, e
 			}
-
-			// Otherwise, the error was something else, server related.
-			// We need to infinitely retry the remote call until either
-			// (a) a response is successfully received, or
-			// (b) we encounter a disconnection error.
-			log.Println("miner encountered some other error, try again")
+			// There was some other error returned by the miner, continue.
+			log.Println("received unexpected server err, trying again")
 			log.Println(err)
 			continue
 		}
-		return reply, nil
+
+		return minerRes.Data.(uint16), nil
 	}
 }
 
@@ -366,8 +386,8 @@ func (client *rfsClient) ReadRec(fname string, recordNum uint16, record *Record)
 
 	for {
 		log.Printf("asking miner to read record of file %s at position %d...\n", fname, recordNum)
-		var res *OperationRecord
-		err = client.Call("ClientAPI.ReadRecord", op, &res)
+		var minerRes *MinerRes
+		err = client.Call("ClientAPI.ReadRecord", op, &minerRes)
 		if err != nil {
 			if err == rpc.ErrShutdown {
 				// If the RPC connection was lost, return a rfslib.DisconnectedError.
@@ -381,15 +401,30 @@ func (client *rfsClient) ReadRec(fname string, recordNum uint16, record *Record)
 			continue
 		}
 
-		if recordNum == res.RecordNum {
+		if hasErr, err := minerRes.HasErr, minerRes.Error; hasErr {
+			if e, ok := err.(FileDoesNotExistError); ok {
+				// If the file does not exist (according to our miner connection),
+				// return FileDoesNotExistError.
+				log.Printf("file %s does not exist, returning FileDoesNotExistError\n", fname)
+				log.Println(e)
+				return e
+			}
+			// There was some other error returned by the miner, continue.
+			log.Println("received unexpected server err, trying again")
+			log.Println(err)
+			continue
+		}
+
+		gotNum := minerRes.Data.(OperationRecord).RecordNum
+		if recordNum == gotNum {
 			// We found the corrent record.  Read the data into
 			// the record pointer and return.
-			*record = res.RecordData
+			*record = minerRes.Data.(OperationRecord).RecordData
 			return
 		}
 		// Otherwise, we got an incorrent record.  This probably means
 		// that recordNum has not been confirmed yet.  Just try again.
-		log.Printf("miner returned record with serial num %d, expected %d\n", recordNum, res.RecordNum)
+		log.Printf("miner returned record with serial num %d, expected %d\n", recordNum, minerRes.Data.(OperationRecord).RecordData)
 		log.Println("trying again...")
 	}
 }
