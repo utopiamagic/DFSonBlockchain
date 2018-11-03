@@ -175,6 +175,7 @@ func (client *rfsClient) CreateFile(fname string) (err error) {
 
 	// First make sure that the filename is valid.
 	if len(fname) > 64 {
+		log.Printf("could not create file with fname %s because fname exceeded 64 bytes", fname)
 		return BadFilenameError(fname)
 	}
 
@@ -184,12 +185,14 @@ func (client *rfsClient) CreateFile(fname string) (err error) {
 	if err != nil {
 		if err == rpc.ErrShutdown {
 			// If the RPC connection was lost, return a rfslib.DisconnectedError.
+			log.Printf("connection to miner at address %s was lost, returning DisconnectedError", client.minerAddr)
 			return DisconnectedError(fmt.Sprintf("client disconnected from miner at %s\n", client.minerAddr))
 		}
 	}
 	for _, fn := range fnames {
 		if fn == fname {
 			// This file already exists!
+			log.Printf("file %s already exists, returning FileExistsError", fname)
 			return FileExistsError(fname)
 		}
 	}
@@ -202,11 +205,13 @@ func (client *rfsClient) CreateFile(fname string) (err error) {
 
 	// First, block until we have enough record coins.
 	for {
+		log.Println("submitting create file record to miner...")
 		var received bool
 		err = client.Call("ClientAPI.SubmitRecord", op, &received)
 		if err != nil {
 			if err == rpc.ErrShutdown {
 				// If the RPC connection was lost, return a rfslib.DisconnectedError.
+				log.Printf("connection to miner at address %s was lost, returning DisconnectedError", client.minerAddr)
 				return DisconnectedError(fmt.Sprintf("client disconnected from miner at %s\n", client.minerAddr))
 			}
 
@@ -216,19 +221,23 @@ func (client *rfsClient) CreateFile(fname string) (err error) {
 				continue
 			}
 			// If there was some other error, file already exists.
+			log.Println("miner encountered some other error, treat as FileExistsError")
 			return FileExistsError(fname)
-
 		}
 		break
 	}
 
+	log.Println("create file record submitted (miner had enough coins)")
+
 	// Now, block until the transaction is confirmed.
 	for {
+		log.Println("waiting until transaction is confirmed...")
 		var received bool
 		err = client.Call("ClientAPI.ConfirmOperation", op, &received)
 		if err != nil {
 			if err == rpc.ErrShutdown {
 				// If the RPC connection was lost, return a rfslib.DisconnectedError.
+				log.Printf("connection to miner at address %s was lost, returning DisconnectedError", client.minerAddr)
 				return DisconnectedError(fmt.Sprintf("client disconnected from miner at %s\n", client.minerAddr))
 			}
 
@@ -238,6 +247,7 @@ func (client *rfsClient) CreateFile(fname string) (err error) {
 				continue
 			}
 			// If there was some other error, file already exists.
+			log.Println("miner encountered some other error, treat as FileExistsError")
 			return FileExistsError(fname)
 		}
 		break
