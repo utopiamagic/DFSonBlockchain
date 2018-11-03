@@ -362,14 +362,10 @@ func (mapi *MinerAPI) SubmitRecord(newOpRecord *rfslib.OperationRecord, nextReco
 	if err != nil {
 		return errors.New(funcName + "checking balanceRequired:" + err.Error())
 	}
-	// err = mapi.miner.validateRecordSemantics(block, *operationRecord)
-	// We assume that the previous records are confirmed before a client append a new one
-	mostRecentRecord, err := mapi.miner.readRecord(newOpRecord.FileName, 65535)
+	err = mapi.miner.validateRecordSemantics(block, *newOpRecord)
 	if err != nil {
-		return err
+		return errors.New(funcName + err.Error())
 	}
-	newOpRecord.RecordNum = mostRecentRecord.RecordNum + 1
-	*nextRecordNum = newOpRecord.RecordNum
 	switch newOpRecord.OperationType {
 	case "delete":
 		break
@@ -402,19 +398,14 @@ func (capi *ClientAPI) ReadRecord(recordInfo *rfslib.OperationRecord, matchingRe
 
 // SubmitRecord RPC (call from ClientAPI) submits operationRecord to the miner network
 // if the mined coins are sufficient to cover the cost
-func (capi *ClientAPI) SubmitRecord(operationRecord *rfslib.OperationRecord, received *bool) error {
+func (capi *ClientAPI) SubmitRecord(newOpRecord *rfslib.OperationRecord, nextRecordNum *uint16) error {
 	block := capi.miner.getBlockFromLongestChain()
-	*received = true
 	funcName := "ClientAPI.SubmitRecord: "
 	balance, err := capi.miner.getBalance(block, capi.miner.MinerID)
 	if err != nil {
 		return errors.New(funcName + "checking balanceRequired:" + err.Error())
 	}
-	err = capi.miner.validateRecordSemantics(block, *operationRecord)
-	if err != nil {
-		return err
-	}
-	switch operationRecord.OperationType {
+	switch newOpRecord.OperationType {
 	case "delete":
 		break
 	case "create":
@@ -425,11 +416,22 @@ func (capi *ClientAPI) SubmitRecord(operationRecord *rfslib.OperationRecord, rec
 		if balance < 1 {
 			return rfslib.ErrInsufficientAppendBalance{Have: int(balance), Need: 1}
 		}
-		// Need to check for and return rfslib.FileMaxLenReachedError
-		// Need to set received to the position of the record appended (uint16)
+		// We assume that the previous records are confirmed before a client append a new one
+		mostRecentRecord, err := capi.miner.readRecord(newOpRecord.FileName, 65535)
+		if err != nil {
+			log.Fatalln(funcName, "find record number:", err)
+			return err
+		}
+		if mostRecentRecord.RecordNum == 65535 {
+			return rfslib.FileMaxLenReachedError(funcName + " reached max length 65535")
+		}
+		if newOpRecord.RecordNum == 0 {
+			newOpRecord.RecordNum = mostRecentRecord.RecordNum + 1
+			*nextRecordNum = newOpRecord.RecordNum
+		}
 	}
-	capi.miner.OperationRecordChan <- *operationRecord
-	capi.miner.broadcastOperationRecord(operationRecord)
+	capi.miner.OperationRecordChan <- *newOpRecord
+	capi.miner.broadcastOperationRecord(newOpRecord)
 	return nil
 }
 
@@ -1030,9 +1032,9 @@ func (m *Miner) broadcastOperationRecord(opRecord *rfslib.OperationRecord) error
 	calls := make(map[string]*rpc.Call)
 	failedCalls := make([]string, 0, 100)
 	m.peerMiners.Range(func(remoteMinerID, client interface{}) bool {
-		reply := new(bool)
-		submitRecordCall := client.(*rpc.Client).Go("MinerAPI.SubmitRecord", opRecord, reply, nil)
-		log.Println("broadcastOperationRecord:")
+		nextRecordID := new(uint16)
+		submitRecordCall := client.(*rpc.Client).Go("MinerAPI.SubmitRecord", opRecord, nextRecordID, nil)
+		log.Println("broadcastOperationRecord:", opRecord.FileName, opRecord.RecordNum)
 		calls[remoteMinerID.(string)] = submitRecordCall
 		return true
 	})
