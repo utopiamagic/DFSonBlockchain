@@ -467,10 +467,10 @@ func (client *rfsClient) AppendRec(fname string, record *Record) (recordNum uint
 	}
 
 	// First, block until we have enough record coins to append.
-	var nextRecord uint16
+	var minerRes MinerRes
 	for {
 		log.Printf("asking miner to append record to file %s\n", fname)
-		err = client.Call("ClientAPI.SubmitRecord", op, &nextRecord)
+		err = client.Call("ClientAPI.SubmitRecord", op, &minerRes)
 		if err != nil {
 			if err == rpc.ErrShutdown {
 				// If the RPC connection was lost, return a rfslib.DisconnectedError.
@@ -478,7 +478,13 @@ func (client *rfsClient) AppendRec(fname string, record *Record) (recordNum uint
 				log.Println(err)
 				return 0, DisconnectedError(fmt.Sprintf("client disconnected from miner at %s\n", client.minerAddr))
 			}
+			// There was some other error returned by the miner, continue.
+			log.Println("received unexpected server err, trying again")
+			log.Println(err)
+			continue
+		}
 
+		if hasErr, err := minerRes.HasErr, minerRes.Error; hasErr {
 			switch e := err.(type) {
 			case ErrInsufficientAppendBalance:
 				// If we don't have enough record coins to append to the file, try again until we do.
@@ -504,8 +510,8 @@ func (client *rfsClient) AppendRec(fname string, record *Record) (recordNum uint
 	// Now, block until the transaction is confirmed.
 	for {
 		log.Println("waiting until transaction is confirmed...")
-		var received uint16
-		err = client.Call("ClientAPI.ConfirmOperation", op, &received)
+		var minerRes MinerRes
+		err = client.Call("ClientAPI.ConfirmOperation", op, &minerRes)
 		if err != nil {
 			if err == rpc.ErrShutdown {
 				// If the RPC connection was lost, return a rfslib.DisconnectedError.
@@ -513,7 +519,13 @@ func (client *rfsClient) AppendRec(fname string, record *Record) (recordNum uint
 				log.Println(err)
 				return 0, DisconnectedError(fmt.Sprintf("client disconnected from miner at %s\n", client.minerAddr))
 			}
+			// There was some other error returned by the miner, continue.
+			log.Println("received unexpected server err, trying again")
+			log.Println(err)
+			continue
+		}
 
+		if hasErr, err := minerRes.HasErr, minerRes.Error; hasErr {
 			if err == ErrAppendNotConfirmed {
 				// We're not confirmed yet, try again until we are.
 				log.Println("Operation not confirmed, trying again...")
@@ -528,7 +540,7 @@ func (client *rfsClient) AppendRec(fname string, record *Record) (recordNum uint
 		break
 	}
 	// If we got this far, the operation was submitted and confirmed.
-	return nextRecord, nil
+	return minerRes.Data.(uint16), nil
 }
 
 // Initialize ...
