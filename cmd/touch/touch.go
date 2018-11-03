@@ -1,12 +1,13 @@
 package main
 
 import (
-	"./rfslib"
 	"fmt"
 	"io/ioutil"
 	"log"
 	"os"
 	"strings"
+
+	"github.ugrad.cs.ubc.ca/CPSC416-2018W-T1/P1-i8b0b-e8y0b/rfslib"
 )
 
 func get_local_miner_ip_addresses(fname string) (string, string, error) {
