@@ -388,20 +388,32 @@ func (mapi *MinerAPI) SubmitRecord(newOpRecord *rfslib.OperationRecord, nextReco
 
 // ReadRecord RPC (call from ClientAPI) makes a best effort read and returns the closet matching OperationRecord
 // it only returns an error if the given file cannot be found or if it encounters an internal error
-func (capi *ClientAPI) ReadRecord(recordInfo *rfslib.OperationRecord, matchingRecord *rfslib.OperationRecord) error {
+func (capi *ClientAPI) ReadRecord(recordInfo *rfslib.OperationRecord, minerRes *rfslib.MinerRes) error {
 	fname := recordInfo.FileName
 	recordNum := recordInfo.RecordNum
+
 	opRecord, err := capi.miner.readRecord(fname, recordNum)
 	if err != nil {
+		if err, ok := err.(rfslib.FileDoesNotExistError); ok {
+			*minerRes = rfslib.MinerRes{
+				HasErr: true,
+				Error:  err,
+			}
+			return nil
+		}
 		return err
 	}
-	*matchingRecord = opRecord
+
+	*minerRes = rfslib.MinerRes{
+		Data:   opRecord,
+		HasErr: false,
+	}
 	return nil
 }
 
 // SubmitRecord RPC (call from ClientAPI) submits operationRecord to the miner network
 // if the mined coins are sufficient to cover the cost
-func (capi *ClientAPI) SubmitRecord(newOpRecord *rfslib.OperationRecord, nextRecordNum *uint16) error {
+func (capi *ClientAPI) SubmitRecord(newOpRecord *rfslib.OperationRecord, res *rfslib.MinerRes) error {
 	block := capi.miner.getBlockFromLongestChain()
 	funcName := "ClientAPI.SubmitRecord: "
 	balance, err := capi.miner.getBalance(block, capi.miner.MinerID)
@@ -413,11 +425,17 @@ func (capi *ClientAPI) SubmitRecord(newOpRecord *rfslib.OperationRecord, nextRec
 		break
 	case "create":
 		if uint32(capi.miner.NumCoinsPerFileCreate) > balance {
-			return rfslib.ErrInsufficientCreateBalance{Have: int(balance), Need: int(capi.miner.NumCoinsPerFileCreate)}
+			*res = rfslib.MinerRes{
+				HasErr: true,
+				Error:  rfslib.ErrInsufficientCreateBalance{Have: int(balance), Need: int(capi.miner.NumCoinsPerFileCreate)},
+			}
 		}
 	case "append":
 		if balance < 1 {
-			return rfslib.ErrInsufficientAppendBalance{Have: int(balance), Need: 1}
+			*res = rfslib.MinerRes{
+				HasErr: true,
+				Error:  rfslib.ErrInsufficientAppendBalance{Have: int(balance), Need: 1},
+			}
 		}
 		// We assume that the previous records are confirmed before a client append a new one
 		mostRecentRecord, err := capi.miner.readRecord(newOpRecord.FileName, 65535)
@@ -426,11 +444,17 @@ func (capi *ClientAPI) SubmitRecord(newOpRecord *rfslib.OperationRecord, nextRec
 			return err
 		}
 		if mostRecentRecord.RecordNum == 65535 {
-			return rfslib.FileMaxLenReachedError(funcName + " reached max length 65535")
+			*res = rfslib.MinerRes{
+				HasErr: true,
+				Error:  rfslib.FileMaxLenReachedError(funcName + " reached max length 65535"),
+			}
 		}
 		if newOpRecord.RecordNum == 0 {
 			newOpRecord.RecordNum = mostRecentRecord.RecordNum + 1
-			*nextRecordNum = newOpRecord.RecordNum
+			*res = rfslib.MinerRes{
+				HasErr: false,
+				Data:   newOpRecord.RecordNum,
+			}
 		}
 	}
 	capi.miner.OperationRecordChan <- *newOpRecord
@@ -465,9 +489,8 @@ func (m *Miner) getOperationRecordHeight(block Block, srcRecord rfslib.Operation
 
 // ConfirmOperation RPC should be invoked by the RFS Client
 // upon succesfully confimation it returns nil
-func (capi *ClientAPI) ConfirmOperation(operationRecord *rfslib.OperationRecord, received *bool) error {
+func (capi *ClientAPI) ConfirmOperation(operationRecord *rfslib.OperationRecord, minerRes *rfslib.MinerRes) error {
 	block := capi.miner.getBlockFromLongestChain()
-	*received = true
 	confirmedBlocksNum, err := capi.miner.getOperationRecordHeight(block, *operationRecord)
 	if err != nil {
 		return err
@@ -479,15 +502,20 @@ func (capi *ClientAPI) ConfirmOperation(operationRecord *rfslib.OperationRecord,
 		return errors.New("Delete not supported")
 	case "create":
 		if int(capi.miner.ConfirmsPerFileCreate) > confirmedBlocksNum {
-			return rfslib.ErrCreateNotConfirmed
+			*minerRes = rfslib.MinerRes{
+				HasErr: true,
+				Error:  rfslib.ErrCreateNotConfirmed,
+			}
 		}
-		return nil
 	case "append":
 		if int(capi.miner.ConfirmsPerFileAppend) > confirmedBlocksNum {
-			return rfslib.ErrAppendNotConfirmed
+			*minerRes = rfslib.MinerRes{
+				HasErr: true,
+				Error:  rfslib.ErrAppendNotConfirmed,
+			}
 		}
-		return nil
 	}
+	return nil
 }
 
 // GetBalance RPC call should be invoked by the RFS Client and does not take an input
@@ -632,12 +660,22 @@ func (capi *ClientAPI) ListFiles(caller string, fnames *[]string) error {
 }
 
 // CountRecords RPC counts the number of records for the given file
-func (capi *ClientAPI) CountRecords(fname string, num *uint16) error {
+func (capi *ClientAPI) CountRecords(fname string, minerRes *rfslib.MinerRes) error {
 	recordNum, err := capi.miner.countRecords(fname)
 	if err != nil {
+		if err, ok := err.(rfslib.FileDoesNotExistError); ok {
+			*minerRes = rfslib.MinerRes{
+				HasErr: true,
+				Error:  err,
+			}
+			return nil
+		}
 		return err
 	}
-	*num = recordNum
+	*minerRes = rfslib.MinerRes{
+		HasErr: false,
+		Data:   recordNum,
+	}
 	return nil
 }
 
