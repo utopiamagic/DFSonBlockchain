@@ -353,18 +353,29 @@ func (client *rfsClient) ReadRec(fname string, recordNum uint16, record *Record)
 
 // AppendRec implements RFS.AppendRec.
 // See RFS.AppendRec.
-
-// Appends a new record to a file with name fname with the
-// contents pointed to by record. Returns the position of the
-// record that was just appended as recordNum. Returns a non-nil
-// error if the operation was unsuccessful.
-// Requires record coins.
-//
-// Can return the following errors:
-// - DisconnectedError
-// - FileDoesNotExistError
-// - FileMaxLenReachedError
 func (client *rfsClient) AppendRec(fname string, record *Record) (recordNum uint16, err error) {
+
+	// Get all file names first, so we can make sure that
+	// fname exists.
+	fnames, err := client.ListFiles()
+	if err != nil {
+		if err == rpc.ErrShutdown {
+			// If the RPC connection was lost, return a rfslib.DisconnectedError.
+			return 0, DisconnectedError(fmt.Sprintf("client disconnected from miner at %s\n", client.minerAddr))
+		}
+	}
+
+	found := false
+	for _, fn := range fnames {
+		if fn == fname {
+			// This file exists!
+			found = true
+		}
+	}
+
+	if !found {
+		return 0, FileDoesNotExistError(fmt.Sprintf("file %s does not exist", fname))
+	}
 
 	// Create an append record.
 	op := OperationRecord{
@@ -374,20 +385,23 @@ func (client *rfsClient) AppendRec(fname string, record *Record) (recordNum uint
 	}
 
 	// First, block until we have enough record coins to append.
+	var nextRecord uint16
 	for {
-		var received bool
-		err = client.Call("ClientAPI.SubmitRecord", op, &received)
+		err = client.Call("ClientAPI.SubmitRecord", op, &nextRecord)
 		if err != nil {
 			if err == rpc.ErrShutdown {
 				// If the RPC connection was lost, return a rfslib.DisconnectedError.
 				return 0, DisconnectedError(fmt.Sprintf("client disconnected from miner at %s\n", client.minerAddr))
 			}
 
-			switch err.(type) {
+			switch e := err.(type) {
 			case ErrInsufficientAppendBalance:
 				// If we don't have enough record coins to append to the file, try again until we do.
 				log.Println("Insufficient record coins to append to file, trying again...")
 				continue
+			case FileMaxLenReachedError:
+				log.Printf("could not append to %s because its max length has been reached", fname)
+				return 0, e
 			default:
 				// If there was some other error, also just try again.
 				continue
@@ -397,9 +411,9 @@ func (client *rfsClient) AppendRec(fname string, record *Record) (recordNum uint
 	}
 
 	// Now, block until the transaction is confirmed.
-	var pos uint16
 	for {
-		err = client.Call("ClientAPI.ConfirmOperation", op, &pos)
+		var received uint16
+		err = client.Call("ClientAPI.ConfirmOperation", op, &received)
 		if err != nil {
 			if err == rpc.ErrShutdown {
 				// If the RPC connection was lost, return a rfslib.DisconnectedError.
@@ -417,7 +431,7 @@ func (client *rfsClient) AppendRec(fname string, record *Record) (recordNum uint
 		break
 	}
 	// If we got this far, the operation was submitted and confirmed.
-	return pos, nil
+	return nextRecord, nil
 }
 
 // Initialize ...
