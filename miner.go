@@ -336,7 +336,7 @@ func (m *Miner) validateBlock(block Block) error {
 		}
 		// Check that the previous block hash points to a legal, previously generated, block.
 		if _, ok := m.chain.Load(t.PrevHash); ok {
-			fmt.Println("validateBlock: the previous block of this NOPBlock is:", t.prevHash())
+			// fmt.Println("validateBlock: the previous block of this NOPBlock is:", t.prevHash())
 		} else {
 			return errors.New("validateBlock: NOPBlock " + t.hash() + " does not have a previous block")
 		}
@@ -358,6 +358,9 @@ func (m *Miner) validateBlock(block Block) error {
 func (mapi *MinerAPI) SubmitRecord(newOpRecord *rfslib.OperationRecord, nextRecordNum *uint16) error {
 	funcName := "MinerAPI.SubmitRecord: "
 	block := mapi.miner.getBlockFromLongestChain()
+
+	log.Println(funcName, newOpRecord.OperationType, newOpRecord.FileName)
+
 	balance, err := mapi.miner.getBalance(block, newOpRecord.MinerID)
 	if err != nil {
 		return errors.New(funcName + "checking balanceRequired:" + err.Error())
@@ -970,6 +973,7 @@ func (m *Miner) generateBlocks() {
 			}
 		// we have received a new record
 		case operationRecord := <-m.OperationRecordChan:
+			log.Println("generateBlocks: received the generated operationRecord", operationRecord.FileName, operationRecord.MinerID)
 			if opBlockTimer.Stop() {
 				opBlockTimer.Reset(time.Duration(m.GenOpBlockTimeout) * time.Millisecond)
 				if generatingNOPBlock {

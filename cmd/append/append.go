@@ -29,6 +29,7 @@ func main() {
 	fname := os.Args[1]
 	record_string := os.Args[2]
 	local_ip, miner_address, err := get_local_miner_ip_addresses("./.rfs")
+	log.Println("miner_address", miner_address)
 	if err != nil {
 		log.Fatal("Failed to obtain ip addresses from ./.rfs")
 	}
