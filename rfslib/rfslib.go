@@ -237,6 +237,7 @@ func (client *rfsClient) CreateFile(fname string) (err error) {
 				// If we don't have enough record coins to create the file, try again until we do.
 				log.Println("Insufficient record coins to create file, trying again...")
 				log.Println(err)
+				time.Sleep(1 * time.Second)
 				continue
 			}
 			// There was some other error returned by the miner, continue.
@@ -272,6 +273,7 @@ func (client *rfsClient) CreateFile(fname string) (err error) {
 				// We're not confirmed yet, try again until we are.
 				log.Println("Operation not confirmed, trying again...")
 				log.Println(err)
+				time.Sleep(1 * time.Second)
 				continue
 			}
 			// There was some other error returned by the miner, continue.
@@ -306,7 +308,6 @@ func (client *rfsClient) ListFiles() (fnames []string, err error) {
 			// (b) we encounter a disconnection error.
 			log.Println("miner encountered some other error, try again")
 			log.Println(err)
-			time.Sleep(time.Second)
 			continue
 		}
 		return reply, nil
@@ -428,6 +429,7 @@ func (client *rfsClient) ReadRec(fname string, recordNum uint16, record *Record)
 		// that recordNum has not been confirmed yet.  Just try again.
 		log.Printf("miner returned record with serial num %d, expected %d\n", recordNum, minerRes.Data.(OperationRecord).RecordData)
 		log.Println("trying again...")
+		time.Sleep(1 * time.Second)
 	}
 }
 
@@ -492,6 +494,7 @@ func (client *rfsClient) AppendRec(fname string, record *Record) (recordNum uint
 				// If we don't have enough record coins to append to the file, try again until we do.
 				log.Println("Insufficient record coins to append to file, trying again...")
 				log.Println(e)
+				time.Sleep(1 * time.Second)
 				continue
 			case FileMaxLenReachedError:
 				log.Printf("could not append to %s because its max length has been reached", fname)
@@ -532,6 +535,7 @@ func (client *rfsClient) AppendRec(fname string, record *Record) (recordNum uint
 				// We're not confirmed yet, try again until we are.
 				log.Println("Operation not confirmed, trying again...")
 				log.Println(err)
+				time.Sleep(1 * time.Second)
 				continue
 			}
 			// If there was some other error, also just try again.
