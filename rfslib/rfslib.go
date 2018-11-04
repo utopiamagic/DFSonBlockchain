@@ -15,9 +15,9 @@ import (
 	"fmt"
 	"log"
 	"net/rpc"
+	"time"
 
 	"github.com/DistributedClocks/GoVector/govec"
-	"github.com/DistributedClocks/GoVector/govec/vrpc"
 )
 
 // A Record is the unit of file access (reading/appending) in RFS.
@@ -254,6 +254,7 @@ func (client *rfsClient) CreateFile(fname string) (err error) {
 		log.Println("waiting until transaction is confirmed...")
 		var minerRes MinerRes
 		err = client.Call("ClientAPI.ConfirmOperation", op, &minerRes)
+		log.Println("is confirmed...")
 		if err != nil {
 			if err == rpc.ErrShutdown {
 				// If the RPC connection was lost, return a rfslib.DisconnectedError.
@@ -305,6 +306,7 @@ func (client *rfsClient) ListFiles() (fnames []string, err error) {
 			// (b) we encounter a disconnection error.
 			log.Println("miner encountered some other error, try again")
 			log.Println(err)
+			time.Sleep(time.Second)
 			continue
 		}
 		return reply, nil
@@ -556,13 +558,14 @@ func (client *rfsClient) AppendRec(fname string, record *Record) (recordNum uint
 // - Networking errors related to localAddr or minerAddr
 func Initialize(localAddr string, minerAddr string) (rfs RFS, err error) {
 	//Initalize GoVector
-	options := govec.GetDefaultLogOptions()
+	// options := govec.GetDefaultLogOptions()
 	//Access config and set timestamps (realtime) to true
 	config := govec.GetDefaultConfig()
 	config.UseTimestamps = true
-	logger := govec.InitGoVector("Client", "clientlog", config)
+	// logger := govec.InitGoVector("Client", "clientlog", config)
 
-	client, err := vrpc.RPCDial("tcp", minerAddr, logger, options)
+	// client, err := vrpc.RPCDial("tcp", minerAddr, logger, options)
+	client, err := rpc.Dial("tcp", minerAddr)
 	if err != nil {
 		log.Println(err)
 		return nil, DisconnectedError(minerAddr)

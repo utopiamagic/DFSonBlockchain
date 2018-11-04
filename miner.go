@@ -26,7 +26,6 @@ import (
 	"time"
 
 	"github.com/DistributedClocks/GoVector/govec"
-	"github.com/DistributedClocks/GoVector/govec/vrpc"
 	"github.com/google/go-cmp/cmp"
 
 	"github.ugrad.cs.ubc.ca/CPSC416-2018W-T1/P1-i8b0b-e8y0b/rfslib"
@@ -216,9 +215,10 @@ func (mapi *MinerAPI) GetBlock(headerHash string, reply *Block) error {
 }
 
 func (m *Miner) addNode(minerInfo PeerMinerInfo) error {
-	client, err := vrpc.RPCDial("tcp", minerInfo.IncomingMinersAddr, m.Logger, m.GoVecOptions)
+	client, err := rpc.Dial("tcp", minerInfo.IncomingMinersAddr)
+	// client, err := vrpc.RPCDial("tcp", minerInfo.IncomingMinersAddr, m.Logger, m.GoVecOptions)
 	if err != nil {
-		log.Fatal("addNode dialing:", minerInfo.IncomingMinersAddr, err)
+		log.Fatalln("addNode dialing:", minerInfo.IncomingMinersAddr, err)
 		return err
 	}
 	m.peerMiners.Store(minerInfo.MinerID, client)
@@ -985,10 +985,6 @@ func (m *Miner) generateBlocks() {
 	opBlockTimer := time.NewTimer(math.MaxInt64)
 	opBlockTimer.Stop()
 
-	m.StopMiningChan = make(chan string)
-	// m.NOPBlockStopChan = make(chan string)
-	m.GeneratedBlocksChan = make(chan Block)
-	m.OperationRecordChan = make(chan rfslib.OperationRecord)
 	recordsMap := make(map[rfslib.OperationRecord]bool)
 	generatingNOPBlock := false
 	generatingOPBlock := false
@@ -996,7 +992,7 @@ func (m *Miner) generateBlocks() {
 		select {
 		default:
 			if !generatingNOPBlock && !generatingOPBlock {
-				log.Println("generateBlocks: mining NOPBlock")
+				// log.Println("generateBlocks: mining NOPBlock")
 				go m.computeNOPBlock()
 				generatingNOPBlock = true
 			}
@@ -1117,6 +1113,10 @@ func (m *Miner) initializeMiner(settings Settings) error {
 	m.Settings = settings
 	m.GoVecOptions = govec.GetDefaultLogOptions()
 
+	m.StopMiningChan = make(chan string)
+	m.GeneratedBlocksChan = make(chan Block)
+	m.OperationRecordChan = make(chan rfslib.OperationRecord)
+
 	genesisBlock := GenesisBlock{m.GenesisBlockHash}
 	err := m.addBlock(genesisBlock)
 	if err != nil {
@@ -1124,14 +1124,15 @@ func (m *Miner) initializeMiner(settings Settings) error {
 		return err
 	}
 	for _, addr := range m.PeerMinersAddrs {
-		client, err := vrpc.RPCDial("tcp", addr, m.Logger, m.GoVecOptions)
+		// client, err := vrpc.RPCDial("tcp", addr, m.Logger, m.GoVecOptions)
+		client, err := rpc.Dial("tcp", addr)
 		if err != nil {
-			log.Fatal("dialing:", addr, err)
+			log.Fatalln("dialing:", addr, err)
 			return err
 		}
 		log.Println("dialed:", addr)
 		// Then make a remote call
-		var remoteMinerID string
+		remoteMinerID := "remoteMinerID"
 		var status bool
 		client.Call("MinerAPI.GetPeerInfo", m.MinerID+":initializeChains", &remoteMinerID)
 		err = client.Call("MinerAPI.AddNode", PeerMinerInfo{m.IncomingMinersAddr, m.MinerID}, &status)
@@ -1178,6 +1179,62 @@ func loadJSON(fn string) (Settings, error) {
 	return s, nil
 }
 
+func (m *Miner) serveClientAPI() {
+	// Register RPC methods for clients to call
+	clientAPI := new(ClientAPI)
+	clientAPI.listenAddr = m.IncomingClientsAddr
+	clientAPI.miner = m
+
+	l, e := net.Listen("tcp", clientAPI.listenAddr)
+	if e != nil {
+		log.Fatalln("serveClientAPI: listen error:", e)
+	}
+
+	// rpc.Register(clientAPI)
+	// rpc.HandleHTTP()
+	// http.Serve(l, nil)
+
+	clientServer := rpc.NewServer()
+	err := clientServer.Register(clientAPI)
+	if err != nil {
+		log.Fatalln("serveClientAPI: register error:", err)
+	}
+
+	log.Println("serveClientAPI: listening on:", clientAPI.listenAddr)
+	// we will now serve our clients
+	clientServer.Accept(l)
+	// vrpc.ServeRPCConn(clientServer, l, logger, options)
+	log.Println("serveClientAPI: should not reach here")
+}
+
+func (m *Miner) serveMinerAPI() {
+	// Register RPC methods for other miners to call.
+	minerAPI := new(MinerAPI)
+	minerAPI.listenAddr = m.IncomingMinersAddr
+	minerAPI.miner = m
+
+	l, e := net.Listen("tcp", minerAPI.listenAddr)
+	if e != nil {
+		log.Fatalln("serveMinerAPI: listen error:", e)
+	}
+
+	// rpc.Register(minerAPI)
+	// rpc.HandleHTTP()
+	// http.Serve(l, nil)
+
+	minerServer := rpc.NewServer()
+	err := minerServer.Register(minerAPI)
+	if err != nil {
+		log.Fatalln("serveMinerAPI: register error:", err)
+	}
+
+	log.Println("serveMinerAPI: listening on:", minerAPI.listenAddr)
+
+	minerServer.Accept(l)
+	// go vrpc.ServeRPCConn(minerServer, l, logger, options)
+	log.Println("serveMinerAPI: should not reach here")
+}
+
 // Main workhorse method.  We are exposing two sets of APIs through RPC;
 // one for other miners, and one for clients.
 func main() {
@@ -1195,47 +1252,24 @@ func main() {
 	}
 	fmt.Println("Loaded settings", settings)
 
-	fmt.Println("Starting miner prepration")
-
 	var miner Miner
 	err = miner.initializeMiner(settings)
 	if err != nil {
-		log.Fatalln(err)
-	}
-	go miner.generateBlocks()
-
-	// Register RPC methods for other miners to call.
-	minerAPI := new(MinerAPI)
-	minerAPI.listenAddr = miner.IncomingMinersAddr
-	minerAPI.miner = &miner
-
-	minerServer := rpc.NewServer()
-	minerServer.Register(minerAPI)
-	l, e := net.Listen("tcp", minerAPI.listenAddr)
-	if e != nil {
-		log.Fatal("listen error:", e)
+		log.Fatalln("main: initializeMiner:", err)
 	}
 
 	//Initalize GoVector
-	options := govec.GetDefaultLogOptions()
+	// options := govec.GetDefaultLogOptions()
 	//Access config and set timestamps (realtime) to true
-	config := govec.GetDefaultConfig()
-	config.UseTimestamps = true
-	logger := govec.InitGoVector("MinerProcess", "Miner-"+miner.MinerID, config)
-	miner.Logger = logger
-	go vrpc.ServeRPCConn(minerServer, l, logger, options)
+	// config := govec.GetDefaultConfig()
+	// config.UseTimestamps = true
+	// logger := govec.InitGoVector("MinerProcess", "Miner-"+miner.MinerID, config)
+	// miner.Logger = logger
 
-	// Register RPC methods for clients to call
-	clientAPI := new(ClientAPI)
-	clientAPI.listenAddr = miner.IncomingClientsAddr
-	clientAPI.miner = &miner
+	go miner.serveClientAPI()
 
-	clientServer := rpc.NewServer()
-	clientServer.Register(clientAPI)
-	l, e = net.Listen("tcp", clientAPI.listenAddr)
-	if e != nil {
-		log.Fatal("listen error:", e)
-	}
-	// we will block here to serve our clients
-	vrpc.ServeRPCConn(clientServer, l, logger, options)
+	go miner.serveMinerAPI()
+
+	miner.generateBlocks()
+
 }

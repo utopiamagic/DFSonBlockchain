@@ -12,5 +12,5 @@
     "PeerMinersAddrs": [],
     "IncomingMinersAddr": "127.0.0.1:8080",
     "OutgoingMinersIP": "127.0.0.1",
-    "IncomingClientsAddr": "127.0.0.1:9090"
+    "IncomingClientsAddr": "127.0.0.1:8090"
 }
