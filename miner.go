@@ -18,6 +18,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"math"
 	"net"
 	"net/rpc"
 	"os"
@@ -41,8 +42,7 @@ type Block interface {
 
 // GenesisBlock is the first block in this blockchain
 type GenesisBlock struct {
-	Hash    string // The genesis (first) block MD5 hash for this blockchain
-	MinerID string // The identifier of the miner that computed this block (block-minerID)
+	Hash string // The genesis (first) block MD5 hash for this blockchain
 }
 
 func (gblock GenesisBlock) hash() string {
@@ -54,7 +54,7 @@ func (gblock GenesisBlock) prevHash() string {
 }
 
 func (gblock GenesisBlock) minerID() string {
-	return gblock.MinerID
+	return "NoSuchGenesisBlockMiner"
 }
 
 // NOPBlock is a No-OP Block
@@ -121,7 +121,7 @@ type Miner struct {
 
 	// No need to initialize :)
 	chain      sync.Map // {hash: Block} All the blocks in the network
-	chainTips  sync.Map // {Block: height of the fork} The collection of the tails of all valid forks
+	chainTips  sync.Map // {hash: height of the fork} The collection of the tails of all valid forks
 	peerMiners sync.Map // {minerID: *rpc.Client} The connected peer miners (including these newly joined)
 }
 
@@ -194,11 +194,11 @@ type MinerAPI struct {
 
 // GetChainTips RPC provides the active starting point of the current blockchain
 // parameter arg is optional and not being used at all
-func (mapi *MinerAPI) GetChainTips(caller string, reply *map[Block]int) error {
+func (mapi *MinerAPI) GetChainTips(caller string, reply *map[string]int) error {
 	log.Println("MinerAPI.GetChainTips got a call from " + caller)
-	dumpedChainTips := make(map[Block]int)
-	mapi.miner.chainTips.Range(func(block, height interface{}) bool {
-		dumpedChainTips[block.(Block)] = height.(int)
+	dumpedChainTips := make(map[string]int)
+	mapi.miner.chainTips.Range(func(blockHash, height interface{}) bool {
+		dumpedChainTips[blockHash.(string)] = height.(int)
 		return true
 	})
 	*reply = dumpedChainTips
@@ -298,7 +298,8 @@ func (m *Miner) validateBlock(block Block) error {
 			return errors.New("validateBlock: OPBlock " + t.hash() + " does not have the right difficulty")
 		}
 		// Check that the previous block hash points to a legal, previously generated, block.
-		if _, ok := m.chain.Load(t.PrevHash); !ok {
+		prevBlock, prevBlockExists := m.chain.Load(t.PrevHash)
+		if !prevBlockExists {
 			return errors.New("validateBlock: OPBlock " + t.hash() + " does not have a previous block")
 		}
 
@@ -325,7 +326,7 @@ func (m *Miner) validateBlock(block Block) error {
 		// Check that each operation does not violate RFS semantics
 		// (e.g., a record is not mutated or inserted into the middled of an rfs file).
 		for _, opRecord := range t.Records {
-			if err := m.validateRecordSemantics(t, opRecord); err != nil {
+			if err := m.validateRecordSemantics(prevBlock.(Block), opRecord); err != nil {
 				return err
 			}
 		}
@@ -343,7 +344,15 @@ func (m *Miner) validateBlock(block Block) error {
 		break
 	case GenesisBlock:
 		if _, ok := m.chain.Load(m.GenesisBlockHash); ok {
-			return errors.New("validateBlock: a GenesisBlock already existed")
+			return errors.New("validateBlock: a GenesisBlock with the same hash already existed")
+		}
+		loaded := false
+		m.chainTips.Range(func(key, value interface{}) bool {
+			loaded = true
+			return false
+		})
+		if loaded {
+			return errors.New("validateBlock: the local chain already contains a GenesisBlock")
 		}
 	}
 	// check duplicate blocks (currently done in addBlock)
@@ -457,6 +466,7 @@ func (capi *ClientAPI) SubmitRecord(newOpRecord *rfslib.OperationRecord, res *rf
 			}
 		}
 	}
+	newOpRecord.MinerID = capi.miner.MinerID
 	capi.miner.OperationRecordChan <- *newOpRecord
 	capi.miner.broadcastOperationRecord(newOpRecord)
 	return nil
@@ -490,11 +500,14 @@ func (m *Miner) getOperationRecordHeight(block Block, srcRecord rfslib.Operation
 // ConfirmOperation RPC should be invoked by the RFS Client
 // upon succesfully confimation it returns nil
 func (capi *ClientAPI) ConfirmOperation(operationRecord *rfslib.OperationRecord, minerRes *rfslib.MinerRes) error {
+	funcName := "ClientAPI.ConfirmOperation: "
 	block := capi.miner.getBlockFromLongestChain()
 	confirmedBlocksNum, err := capi.miner.getOperationRecordHeight(block, *operationRecord)
 	if err != nil {
+		log.Println(funcName, err)
 		return err
 	}
+	log.Println(funcName, confirmedBlocksNum, operationRecord.FileName)
 	switch operationRecord.OperationType {
 	default:
 		return errors.New("Operation Type not recognized")
@@ -697,26 +710,34 @@ func (m *Miner) getHeight(block Block) (int, error) {
 	return 1, errors.New("The given NOPBlock/OPBlock starts with an orphaned block:" + block.hash())
 }
 
-func (m *Miner) requestPreviousBlocks(block Block) error {
-	prevHash := block.prevHash()
-	prevBlock, exists := m.chain.Load(prevHash)
-	for ; !exists; prevHash = prevBlock.(Block).prevHash() {
+func (m *Miner) requestPreviousBlocks(blockHash string) error {
+	_, exists := m.chain.Load(blockHash)
+	requestedHash := blockHash
+	for !exists {
+		var requestedBlock Block
+		found := false
 		m.peerMiners.Range(func(remoteMinerID, client interface{}) bool {
 			// Make a remote asynchronous call
-			replyBlock := new(Block)
-			err := client.(*rpc.Client).Call("MinerAPI.GetBlock", prevHash, replyBlock)
-			if err != nil {
-				log.Fatal("requestPreviousBlocks error:", err, "continue on with other miners")
+			err := client.(*rpc.Client).Call("MinerAPI.GetBlock", blockHash, &requestedBlock)
+			if err == rpc.ErrShutdown {
+				log.Println("requestPreviousBlocks: miner", remoteMinerID, "is not up; going to be removed")
+				m.peerMiners.Delete(remoteMinerID)
 				return true
+			} else if err == nil {
+				found = true
+				// stop iterating thru peerMiners
+				return false
 			}
-			m.chain.Store(block.hash(), *replyBlock)
-			fmt.Println("requestPreviousBlocks successed:", (*replyBlock).hash())
-			// stop iteration
-			return false
+			log.Println("requestPreviousBlocks: ", err, "continue on with other miners")
+			return true
 		})
-		prevBlock, exists = m.chain.Load(prevHash)
-		if !exists {
-			return errors.New("Cannot find the requested block from other peer miners")
+		if found {
+			m.chain.Store(blockHash, requestedBlock)
+			fmt.Println("requestPreviousBlocks successed:", requestedBlock.hash())
+			requestedHash = requestedBlock.prevHash()
+			_, exists = m.chain.Load(requestedHash)
+		} else {
+			return errors.New("Cannot find the requested block" + requestedHash + "from other peer miners")
 		}
 	}
 	return nil
@@ -727,8 +748,8 @@ func (m *Miner) updateChainTip(newBlock Block) error {
 	if exists {
 		inChainTips := false
 		currentHeight := 0
-		m.chainTips.Range(func(block, height interface{}) bool {
-			if block.(Block).hash() == prevBlock.(Block).hash() {
+		m.chainTips.Range(func(blockHash, height interface{}) bool {
+			if blockHash.(string) == prevBlock.(Block).hash() {
 				inChainTips = true
 				currentHeight = height.(int)
 				return false
@@ -738,12 +759,12 @@ func (m *Miner) updateChainTip(newBlock Block) error {
 		if inChainTips {
 			// we are the first one to work on an original branch
 			// TODO: check if Store() would cause update to malfunction
-			m.chainTips.Store(newBlock, currentHeight+1)
+			m.chainTips.Store(newBlock.hash(), currentHeight+1)
 		} else {
 			// this is a fork of another branch
 			prevHeight, err := m.getHeight(prevBlock.(Block))
-			if err != nil {
-				m.chainTips.Store(newBlock, prevHeight+1)
+			if err == nil {
+				m.chainTips.Store(newBlock.hash(), prevHeight+1)
 			} else {
 				// ask other miners for the previous block?
 				return err
@@ -802,21 +823,17 @@ func (m *Miner) addBlock(block Block) error {
 		if loaded {
 			return errors.New("addBlock: block " + block.hash() + " is already mined by " + actual.(Block).minerID())
 		}
-		if block.hash() == block.prevHash() {
-			// GenesisBlock case
-			_, loaded := m.chainTips.LoadOrStore(block, 0)
-			if loaded {
-				return errors.New("addBlock: the local chain already contains a GenesisBlock")
-			}
-		}
 		err := m.updateChainTip(block)
 		if err != nil {
+			log.Println("addBlock: ", err)
 			// TODO: decide if we want to request the block from other miners
+			// m.requestPreviousBlocks(block.prevHash())
 			return err
 		}
 		return nil
 	}
 	// validation error
+	log.Println("addBlock: ", err)
 	return err
 }
 
@@ -868,13 +885,17 @@ func (m *Miner) validateFork(block Block) error {
 func (m *Miner) getBlockFromLongestChain() Block {
 	maxBlocksNum := 0
 	var longestChainTip Block
-	m.chainTips.Range(func(block, height interface{}) bool {
+	m.chainTips.Range(func(blockHash, height interface{}) bool {
 		if height.(int) > maxBlocksNum {
 			maxBlocksNum = height.(int)
-			longestChainTip = block.(Block)
+			tip, _ := m.chain.Load(blockHash.(string))
+			longestChainTip = tip.(Block)
 		}
 		return true
 	})
+	if longestChainTip == nil {
+		log.Panicln("getBlockFromLongestChain: longestChainTip is nil")
+	}
 	return longestChainTip
 }
 
@@ -895,7 +916,7 @@ func (m *Miner) computeNOPBlock() {
 		default:
 			nopBlock = NOPBlock{prevHash, nonce, m.MinerID, newBalance}
 			if validateNonce(nopBlock, m.PowPerNoOpBlock) == true {
-				log.Println("Generated NOPBlock", nopBlock.hash())
+				// log.Println("Generated NOPBlock", nopBlock.hash())
 				m.GeneratedBlocksChan <- nopBlock
 				return
 			}
@@ -961,11 +982,9 @@ func (m *Miner) computeOPBlock(records []rfslib.OperationRecord) {
 
 // generateBlocks generates blocks continuously and should only be called once
 func (m *Miner) generateBlocks() {
-	opBlockTimer := time.NewTimer(0 * time.Millisecond)
-	if !opBlockTimer.Stop() {
-		// drain the timer
-		<-opBlockTimer.C
-	}
+	opBlockTimer := time.NewTimer(math.MaxInt64)
+	opBlockTimer.Stop()
+
 	m.StopMiningChan = make(chan string)
 	// m.NOPBlockStopChan = make(chan string)
 	m.GeneratedBlocksChan = make(chan Block)
@@ -983,7 +1002,7 @@ func (m *Miner) generateBlocks() {
 			}
 		case generatedBlock := <-m.GeneratedBlocksChan:
 			if err := m.addBlock(generatedBlock); err != nil {
-				log.Println("generateBlocks: ", err)
+				log.Println("generateBlocks: received generateBlock", err)
 				if generatingNOPBlock {
 					generatingNOPBlock = false
 				}
@@ -998,7 +1017,7 @@ func (m *Miner) generateBlocks() {
 				generatingNOPBlock = false
 				go m.broadcastBlock(generatedBlock)
 			case OPBlock:
-				log.Println("generateBlocks: received the generated OPBlock", t.hash(), "with balance", t.MinerBalance
+				log.Println("generateBlocks: received the generated OPBlock", t.hash(), "with balance", t.MinerBalance)
 				generatingOPBlock = false
 				go m.broadcastBlock(generatedBlock)
 			default:
@@ -1007,10 +1026,12 @@ func (m *Miner) generateBlocks() {
 		// we have received a new record
 		case operationRecord := <-m.OperationRecordChan:
 			log.Println("generateBlocks: received the generated operationRecord", operationRecord.FileName, operationRecord.MinerID)
-			if opBlockTimer.Stop() {
+			if wasActive := opBlockTimer.Stop(); !wasActive {
 				opBlockTimer.Reset(time.Duration(m.GenOpBlockTimeout) * time.Millisecond)
 				if generatingNOPBlock {
 					m.StopMiningChan <- "generateBlocks(newRecord, NOPBlock)"
+					generatingNOPBlock = false
+					generatingOPBlock = true
 				}
 			}
 			if _, ok := recordsMap[operationRecord]; !ok {
@@ -1020,9 +1041,11 @@ func (m *Miner) generateBlocks() {
 			if generatingNOPBlock {
 				log.Panicf("generateBlocks: we should not be working on NOPBlocks by now")
 			}
-			if generatingOPBlock {
-				m.StopMiningChan <- "generateBlocks(timedOut, OPBlock)"
-			}
+			/*
+				if generatingOPBlock {
+					log.Printf("generateBlocks: we should not be working on OPBlocks by now; WHY DID IT HAPPEN")
+					m.StopMiningChan <- "generateBlocks(timedOut, OPBlock)"
+				}*/
 			records := make([]rfslib.OperationRecord, 0, len(recordsMap))
 			for k := range recordsMap {
 				records = append(records, k)
@@ -1094,7 +1117,7 @@ func (m *Miner) initializeMiner(settings Settings) error {
 	m.Settings = settings
 	m.GoVecOptions = govec.GetDefaultLogOptions()
 
-	genesisBlock := GenesisBlock{m.GenesisBlockHash, m.MinerID}
+	genesisBlock := GenesisBlock{m.GenesisBlockHash}
 	err := m.addBlock(genesisBlock)
 	if err != nil {
 		log.Println(err)
@@ -1117,12 +1140,16 @@ func (m *Miner) initializeMiner(settings Settings) error {
 			// TODO: consider retry?
 		}
 		m.peerMiners.Store(remoteMinerID, client)
-		remoteChainTips := new(map[Block]int)
-		err = client.Call("MinerAPI.GetChainTips", m.MinerID+":initializeChains", remoteChainTips)
+		remoteChainTips := make(map[string]int)
+		err = client.Call("MinerAPI.GetChainTips", m.MinerID+":initializeChains", &remoteChainTips)
 		if err == nil {
-			for remoteBlock, height := range *remoteChainTips {
-				m.requestPreviousBlocks(remoteBlock)
-				m.chainTips.Store(remoteBlock, height)
+			for remoteBlockHash, height := range remoteChainTips {
+				reqErr := m.requestPreviousBlocks(remoteBlockHash)
+				if reqErr == nil {
+					m.chainTips.Store(remoteBlockHash, height)
+				} else {
+					log.Println(reqErr)
+				}
 			}
 		} else {
 			log.Println(err)
@@ -1171,7 +1198,10 @@ func main() {
 	fmt.Println("Starting miner prepration")
 
 	var miner Miner
-	miner.initializeMiner(settings)
+	err = miner.initializeMiner(settings)
+	if err != nil {
+		log.Fatalln(err)
+	}
 	go miner.generateBlocks()
 
 	// Register RPC methods for other miners to call.
