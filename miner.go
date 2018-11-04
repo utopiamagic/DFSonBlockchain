@@ -423,6 +423,7 @@ func (capi *ClientAPI) ReadRecord(recordInfo *rfslib.OperationRecord, minerRes *
 // SubmitRecord RPC (call from ClientAPI) submits operationRecord to the miner network
 // if the mined coins are sufficient to cover the cost
 func (capi *ClientAPI) SubmitRecord(newOpRecord *rfslib.OperationRecord, res *rfslib.MinerRes) error {
+	log.Printf("GOT CALL WITH OPRECORD %v\n", *newOpRecord)
 	block := capi.miner.getBlockFromLongestChain()
 	funcName := "ClientAPI.SubmitRecord: "
 	balance, err := capi.miner.getBalance(block, capi.miner.MinerID)
@@ -502,9 +503,12 @@ func (m *Miner) getOperationRecordHeight(block Block, srcRecord rfslib.Operation
 // ConfirmOperation RPC should be invoked by the RFS Client
 // upon succesfully confimation it returns nil
 func (capi *ClientAPI) ConfirmOperation(operationRecord *rfslib.OperationRecord, minerRes *rfslib.MinerRes) error {
+	log.Printf("received a confirm request for operation %v\n", operationRecord)
 	funcName := "ClientAPI.ConfirmOperation: "
 	block := capi.miner.getBlockFromLongestChain()
+	log.Println("FIRST")
 	confirmedBlocksNum, err := capi.miner.getOperationRecordHeight(block, *operationRecord)
+	log.Println("SECOND")
 	if err != nil {
 		log.Println(funcName, err)
 		return err
