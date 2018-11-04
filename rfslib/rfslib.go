@@ -1,5 +1,4 @@
 /*
-
 This package specifies the application's interface to the distributed
 records system (RFS) to be used in project 1 of UBC CS 416 2018W1.
 
@@ -243,7 +242,7 @@ func (client *rfsClient) CreateFile(fname string) (err error) {
 			if err == Insufficient {
 				// If we don't have enough record coins to create the file, try again until we do.
 				log.Println("Insufficient record coins to create file, trying again...")
-				time.Sleep(1 * time.Second)
+				time.Sleep(500 * time.Millisecond)
 				continue
 			}
 			// There was some other error returned by the miner, continue.
@@ -261,8 +260,7 @@ func (client *rfsClient) CreateFile(fname string) (err error) {
 		log.Println("waiting until transaction is confirmed...")
 		var minerRes MinerRes
 		err = client.Call("ClientAPI.ConfirmOperation", op, &minerRes)
-		log.Println("is confirmed...")
-		time.Sleep(1 * time.Second)
+		time.Sleep(500 * time.Millisecond)
 		if err != nil {
 			if err == rpc.ErrShutdown {
 				// If the RPC connection was lost, return a rfslib.DisconnectedError.
@@ -279,7 +277,7 @@ func (client *rfsClient) CreateFile(fname string) (err error) {
 			if err == NotConfirmed {
 				// We're not confirmed yet, try again until we are.
 				log.Println("Operation not confirmed, trying again...")
-				time.Sleep(1 * time.Second)
+				time.Sleep(500 * time.Millisecond)
 				continue
 			}
 			// There was some other error returned by the miner, continue.
@@ -433,7 +431,7 @@ func (client *rfsClient) ReadRec(fname string, recordNum uint16, record *Record)
 		// that recordNum has not been confirmed yet.  Just try again.
 		log.Printf("miner returned record with serial num %d, expected %d\n", recordNum, minerRes.Data.(OperationRecord).RecordData)
 		log.Println("trying again...")
-		time.Sleep(1 * time.Second)
+		time.Sleep(500 * time.Millisecond)
 	}
 }
 
@@ -497,7 +495,7 @@ func (client *rfsClient) AppendRec(fname string, record *Record) (recordNum uint
 			case Insufficient:
 				// If we don't have enough record coins to append to the file, try again until we do.
 				log.Println("Insufficient record coins to append to file, trying again...")
-				time.Sleep(1 * time.Second)
+				time.Sleep(500 * time.Millisecond)
 				continue
 			case FileMaxLenReached:
 				log.Printf("could not append to %s because its max length has been reached", fname)
@@ -535,7 +533,7 @@ func (client *rfsClient) AppendRec(fname string, record *Record) (recordNum uint
 			if err == NotConfirmed {
 				// We're not confirmed yet, try again until we are.
 				log.Println("Operation not confirmed, trying again...")
-				time.Sleep(1 * time.Second)
+				time.Sleep(500 * time.Millisecond)
 				continue
 			}
 			// If there was some other error, also just try again.
