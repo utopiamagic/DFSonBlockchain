@@ -761,10 +761,12 @@ func (m *Miner) requestPreviousBlocks(blockHash string) error {
 
 func (m *Miner) updateChainTip(newBlock Block) error {
 	prevBlock, exists := m.chain.Load(newBlock.prevHash())
+	// log.Println("updateChainTip: with hash", newBlock.hash(), newBlock.prevHash())
 	if exists {
 		inChainTips := false
 		currentHeight := 0
 		m.chainTips.Range(func(blockHash, height interface{}) bool {
+			// log.Println("chaintip:", blockHash.(string))
 			if blockHash.(string) == prevBlock.(Block).hash() {
 				inChainTips = true
 				currentHeight = height.(int)
@@ -774,10 +776,12 @@ func (m *Miner) updateChainTip(newBlock Block) error {
 		})
 		if inChainTips {
 			// we are the first one to work on an original branch
-			// TODO: check if Store() would cause update to malfunction
+			// want to add the new block and remove the old one
 			m.chainTips.Store(newBlock.hash(), currentHeight+1)
+			m.chainTips.Delete(newBlock.prevHash())
 		} else {
 			// this is a fork of another branch
+			log.Println("updateChainTip: this block is not in chaintips", newBlock.hash())
 			prevHeight, err := m.getHeight(prevBlock.(Block))
 			if err == nil {
 				m.chainTips.Store(newBlock.hash(), prevHeight+1)
