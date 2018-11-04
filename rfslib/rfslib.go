@@ -20,6 +20,13 @@ import (
 	"github.com/DistributedClocks/GoVector/govec"
 )
 
+const (
+	Insufficient = iota
+	NotConfirmed
+	FileDoesNotExist
+	FileMaxLenReached
+)
+
 // A Record is the unit of file access (reading/appending) in RFS.
 type Record [512]byte
 
@@ -96,7 +103,7 @@ func (e ErrInsufficientAppendBalance) Error() string {
 type MinerRes struct {
 	Data   interface{}
 	HasErr bool
-	Error  error
+	Error  int
 }
 
 var (
@@ -233,10 +240,9 @@ func (client *rfsClient) CreateFile(fname string) (err error) {
 		}
 
 		if hasErr, err := minerRes.HasErr, minerRes.Error; hasErr {
-			if err, ok := err.(ErrInsufficientCreateBalance); ok {
+			if err == Insufficient {
 				// If we don't have enough record coins to create the file, try again until we do.
 				log.Println("Insufficient record coins to create file, trying again...")
-				log.Println(err)
 				time.Sleep(1 * time.Second)
 				continue
 			}
@@ -264,16 +270,15 @@ func (client *rfsClient) CreateFile(fname string) (err error) {
 				log.Println(err)
 				return DisconnectedError(fmt.Sprintf("client disconnected from miner at %s\n", client.minerAddr))
 			}
-			log.Println("received unexpected server err, trying again")
+			log.Println("Operation not confirmed, trying again...")
 			log.Println(err)
 			continue
 		}
 
 		if hasErr, err := minerRes.HasErr, minerRes.Error; hasErr {
-			if err == ErrCreateNotConfirmed {
+			if err == NotConfirmed {
 				// We're not confirmed yet, try again until we are.
 				log.Println("Operation not confirmed, trying again...")
-				log.Println(err)
 				time.Sleep(1 * time.Second)
 				continue
 			}
@@ -335,12 +340,11 @@ func (client *rfsClient) TotalRecs(fname string) (numRecs uint16, err error) {
 		}
 
 		if hasErr, err := minerRes.HasErr, minerRes.Error; hasErr {
-			if e, ok := err.(FileDoesNotExistError); ok {
+			if err == FileDoesNotExist {
 				// If the file does not exist (according to our miner connection),
 				// return FileDoesNotExistError.
 				log.Printf("file %s does not exist, returning FileDoesNotExistError\n", fname)
-				log.Println(e)
-				return 0, e
+				return 0, FileDoesNotExistError(fname)
 			}
 			// There was some other error returned by the miner, continue.
 			log.Println("received unexpected server err, trying again")
@@ -406,12 +410,11 @@ func (client *rfsClient) ReadRec(fname string, recordNum uint16, record *Record)
 		}
 
 		if hasErr, err := minerRes.HasErr, minerRes.Error; hasErr {
-			if e, ok := err.(FileDoesNotExistError); ok {
+			if err == FileDoesNotExist {
 				// If the file does not exist (according to our miner connection),
 				// return FileDoesNotExistError.
 				log.Printf("file %s does not exist, returning FileDoesNotExistError\n", fname)
-				log.Println(e)
-				return e
+				return FileDoesNotExistError(fname)
 			}
 			// There was some other error returned by the miner, continue.
 			log.Println("received unexpected server err, trying again")
@@ -490,21 +493,18 @@ func (client *rfsClient) AppendRec(fname string, record *Record) (recordNum uint
 		}
 
 		if hasErr, err := minerRes.HasErr, minerRes.Error; hasErr {
-			switch e := err.(type) {
-			case ErrInsufficientAppendBalance:
+			switch err {
+			case Insufficient:
 				// If we don't have enough record coins to append to the file, try again until we do.
 				log.Println("Insufficient record coins to append to file, trying again...")
-				log.Println(e)
 				time.Sleep(1 * time.Second)
 				continue
-			case FileMaxLenReachedError:
+			case FileMaxLenReached:
 				log.Printf("could not append to %s because its max length has been reached", fname)
-				log.Println(e)
-				return 0, e
+				return 0, FileMaxLenReachedError(fname)
 			default:
 				// If there was some other error, also just try again.
 				log.Println("miner encountered some other error, try again")
-				log.Println(e)
 				continue
 			}
 		}
@@ -532,10 +532,9 @@ func (client *rfsClient) AppendRec(fname string, record *Record) (recordNum uint
 		}
 
 		if hasErr, err := minerRes.HasErr, minerRes.Error; hasErr {
-			if err == ErrAppendNotConfirmed {
+			if err == NotConfirmed {
 				// We're not confirmed yet, try again until we are.
 				log.Println("Operation not confirmed, trying again...")
-				log.Println(err)
 				time.Sleep(1 * time.Second)
 				continue
 			}

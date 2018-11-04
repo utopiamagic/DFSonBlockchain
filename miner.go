@@ -405,10 +405,10 @@ func (capi *ClientAPI) ReadRecord(recordInfo *rfslib.OperationRecord, minerRes *
 
 	opRecord, err := capi.miner.readRecord(fname, recordNum)
 	if err != nil {
-		if err, ok := err.(rfslib.FileDoesNotExistError); ok {
+		if _, ok := err.(rfslib.FileDoesNotExistError); ok {
 			*minerRes = rfslib.MinerRes{
 				HasErr: true,
-				Error:  err,
+				Error:  rfslib.FileDoesNotExist,
 			}
 			return nil
 		}
@@ -439,14 +439,14 @@ func (capi *ClientAPI) SubmitRecord(newOpRecord *rfslib.OperationRecord, res *rf
 		if uint32(capi.miner.NumCoinsPerFileCreate) > balance {
 			*res = rfslib.MinerRes{
 				HasErr: true,
-				Error:  rfslib.ErrInsufficientCreateBalance{Have: int(balance), Need: int(capi.miner.NumCoinsPerFileCreate)},
+				Error:  rfslib.Insufficient,
 			}
 		}
 	case "append":
 		if balance < 1 {
 			*res = rfslib.MinerRes{
 				HasErr: true,
-				Error:  rfslib.ErrInsufficientAppendBalance{Have: int(balance), Need: 1},
+				Error:  rfslib.Insufficient,
 			}
 		}
 		// We assume that the previous records are confirmed before a client append a new one
@@ -458,7 +458,7 @@ func (capi *ClientAPI) SubmitRecord(newOpRecord *rfslib.OperationRecord, res *rf
 		if mostRecentRecord.RecordNum == 65535 {
 			*res = rfslib.MinerRes{
 				HasErr: true,
-				Error:  rfslib.FileMaxLenReachedError(funcName + " reached max length 65535"),
+				Error:  rfslib.FileMaxLenReached,
 			}
 		}
 		if newOpRecord.RecordNum == 0 {
@@ -468,10 +468,14 @@ func (capi *ClientAPI) SubmitRecord(newOpRecord *rfslib.OperationRecord, res *rf
 				Data:   newOpRecord.RecordNum,
 			}
 		}
+		return nil
 	}
 	newOpRecord.MinerID = capi.miner.MinerID
 	capi.miner.OperationRecordChan <- *newOpRecord
 	capi.miner.broadcastOperationRecord(newOpRecord)
+	*res = rfslib.MinerRes{
+		HasErr: false,
+	}
 	return nil
 }
 
@@ -512,10 +516,8 @@ func (capi *ClientAPI) ConfirmOperation(operationRecord *rfslib.OperationRecord,
 	log.Printf("received a confirm request for operation %v\n", operationRecord)
 	funcName := "ClientAPI.ConfirmOperation: "
 	block := capi.miner.getBlockFromLongestChain()
-	log.Println("FIRST")
 	operationRecord.MinerID = capi.miner.MinerID
 	confirmedBlocksNum, err := capi.miner.getOperationRecordHeight(block, *operationRecord)
-	log.Println("SECOND")
 	if err != nil {
 		log.Println(funcName, err)
 		return err
@@ -530,14 +532,14 @@ func (capi *ClientAPI) ConfirmOperation(operationRecord *rfslib.OperationRecord,
 		if int(capi.miner.ConfirmsPerFileCreate) > confirmedBlocksNum {
 			*minerRes = rfslib.MinerRes{
 				HasErr: true,
-				Error:  rfslib.ErrCreateNotConfirmed,
+				Error:  rfslib.NotConfirmed,
 			}
 		}
 	case "append":
 		if int(capi.miner.ConfirmsPerFileAppend) > confirmedBlocksNum {
 			*minerRes = rfslib.MinerRes{
 				HasErr: true,
-				Error:  rfslib.ErrAppendNotConfirmed,
+				Error:  rfslib.NotConfirmed,
 			}
 		}
 	}
@@ -689,10 +691,10 @@ func (capi *ClientAPI) ListFiles(caller string, fnames *[]string) error {
 func (capi *ClientAPI) CountRecords(fname string, minerRes *rfslib.MinerRes) error {
 	recordNum, err := capi.miner.countRecords(fname)
 	if err != nil {
-		if err, ok := err.(rfslib.FileDoesNotExistError); ok {
+		if _, ok := err.(rfslib.FileDoesNotExistError); ok {
 			*minerRes = rfslib.MinerRes{
 				HasErr: true,
-				Error:  err,
+				Error:  rfslib.FileDoesNotExist,
 			}
 			return nil
 		}
