@@ -487,6 +487,7 @@ func (client *rfsClient) AppendRec(fname string, record *Record) (recordNum uint
 			// There was some other error returned by the miner, continue.
 			log.Println("received unexpected server err, trying again")
 			log.Println(err)
+			time.Sleep(500 * time.Millisecond)
 			continue
 		}
 
@@ -503,6 +504,7 @@ func (client *rfsClient) AppendRec(fname string, record *Record) (recordNum uint
 			default:
 				// If there was some other error, also just try again.
 				log.Println("miner encountered some other error, try again")
+				time.Sleep(500 * time.Millisecond)
 				continue
 			}
 		}
@@ -510,6 +512,7 @@ func (client *rfsClient) AppendRec(fname string, record *Record) (recordNum uint
 	}
 
 	log.Println("append file record submitted (miner had enough coins)")
+	op.RecordNum = minerRes.Data.(uint16)
 
 	// Now, block until the transaction is confirmed.
 	for {
@@ -526,6 +529,7 @@ func (client *rfsClient) AppendRec(fname string, record *Record) (recordNum uint
 			// There was some other error returned by the miner, continue.
 			log.Println("received unexpected server err, trying again")
 			log.Println(err)
+			time.Sleep(500 * time.Millisecond)
 			continue
 		}
 
@@ -539,6 +543,7 @@ func (client *rfsClient) AppendRec(fname string, record *Record) (recordNum uint
 			// If there was some other error, also just try again.
 			log.Println("miner encountered some other error, try again")
 			log.Println(err)
+			time.Sleep(500 * time.Millisecond)
 			continue
 		}
 		break
