@@ -218,7 +218,7 @@ func (m *Miner) addNode(minerInfo PeerMinerInfo) error {
 	client, err := rpc.Dial("tcp", minerInfo.IncomingMinersAddr)
 	// client, err := vrpc.RPCDial("tcp", minerInfo.IncomingMinersAddr, m.Logger, m.GoVecOptions)
 	if err != nil {
-		log.Fatalln("addNode dialing:", minerInfo.IncomingMinersAddr, err)
+		log.Fatalln("addNode: ", err)
 		return err
 	}
 	m.peerMiners.Store(minerInfo.MinerID, client)
@@ -490,9 +490,11 @@ func (m *Miner) getOperationRecordHeight(block Block, srcRecord rfslib.Operation
 			confirmedBlocksNum++
 		}
 		// Check that the previous block hash points to a legal, previously generated, block.
-		if block, ok := m.chain.Load(block.prevHash()); !ok {
-			return -1, errors.New(funcName + "block" + block.(Block).hash() + "does not have a valid prevBlock")
+		prevBlock, exists := m.chain.Load(block.prevHash())
+		if !exists {
+			return -1, errors.New(funcName + "block" + block.hash() + "does not have a valid prevBlock")
 		}
+		block = prevBlock.(Block)
 	}
 	return -1, errors.New(funcName + "the given OperationRecord cannot be found in the chain")
 }
@@ -1127,7 +1129,7 @@ func (m *Miner) initializeMiner(settings Settings) error {
 		// client, err := vrpc.RPCDial("tcp", addr, m.Logger, m.GoVecOptions)
 		client, err := rpc.Dial("tcp", addr)
 		if err != nil {
-			log.Fatalln("dialing:", addr, err)
+			log.Fatalln("initializeMiner: dialing:", addr, err)
 			return err
 		}
 		log.Println("dialed:", addr)
