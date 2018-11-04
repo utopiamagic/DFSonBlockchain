@@ -489,8 +489,8 @@ func (m *Miner) getOperationRecordHeight(block Block, srcRecord rfslib.Operation
 		case OPBlock:
 			log.Println(funcName, "OPBlock", block.hash())
 			for _, dstRecord := range t.Records {
-				log.Println(funcName, confirmedBlocksNum, srcRecord.MinerID, ":", srcRecord.OperationType)
-				log.Println(funcName, confirmedBlocksNum, dstRecord.MinerID, ":", dstRecord.OperationType)
+				log.Println(funcName, confirmedBlocksNum, srcRecord.MinerID, srcRecord.OperationType, srcRecord.RecordNum)
+				log.Println(funcName, confirmedBlocksNum, dstRecord.MinerID, dstRecord.OperationType, srcRecord.RecordNum)
 				if cmp.Equal(srcRecord, dstRecord) {
 					log.Println(funcName, confirmedBlocksNum, dstRecord.FileName, ":", dstRecord.RecordNum)
 					return confirmedBlocksNum, nil
