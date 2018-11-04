@@ -748,11 +748,12 @@ func (m *Miner) requestPreviousBlocks(blockHash string) error {
 		})
 		if found {
 			m.chain.Store(blockHash, requestedBlock)
-			// fmt.Println("requestPreviousBlocks successed:", requestedBlock.hash())
+			fmt.Println("requestPreviousBlocks successed:", requestedBlock.hash())
 			requestedHash = requestedBlock.prevHash()
 			_, exists = m.chain.Load(requestedHash)
+			fmt.Println("requestPreviousBlocks: prevb", exists, requestedHash)
 		} else {
-			return errors.New("Cannot find the requested block" + requestedHash + "from other peer miners")
+			return errors.New("Cannot find the requested block " + requestedHash + "from other peer miners")
 		}
 	}
 	return nil
@@ -1058,10 +1059,12 @@ func (m *Miner) generateBlocks() {
 					m.StopMiningChan <- "generateBlocks(timedOut, OPBlock)"
 				}*/
 			records := make([]rfslib.OperationRecord, 0, len(recordsMap))
-			for k := range recordsMap {
-				records = append(records, k)
+			for k, v := range recordsMap {
+				if v == true {
+					records = append(records, k)
+					recordsMap[k] = false
+				}
 			}
-			recordsMap = make(map[rfslib.OperationRecord]bool)
 			go m.computeOPBlock(records)
 			generatingOPBlock = true
 		}
@@ -1092,7 +1095,7 @@ func (m *Miner) broadcastBlock(block Block) error {
 		}
 	}
 	if len(failedCalls) > 0 {
-		log.Println("broadcastBlock: ", failedCalls)
+		log.Println("broadcastBlock: failedCalls", failedCalls)
 		return errors.New("submitBlockCall failed" + string(len(failedCalls)) + " of " + string(len(calls)))
 	}
 	return nil
