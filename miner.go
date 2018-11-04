@@ -483,8 +483,10 @@ func (m *Miner) getOperationRecordHeight(block Block, srcRecord rfslib.Operation
 		case OPBlock:
 			log.Println(funcName, "OPBlock", block.hash())
 			for _, dstRecord := range t.Records {
-				log.Println(funcName, dstRecord.FileName, ":", dstRecord.RecordNum)
+				log.Println(funcName, confirmedBlocksNum, srcRecord.MinerID, ":", srcRecord.OperationType)
+				log.Println(funcName, confirmedBlocksNum, dstRecord.MinerID, ":", dstRecord.OperationType)
 				if cmp.Equal(srcRecord, dstRecord) {
+					log.Println(funcName, confirmedBlocksNum, dstRecord.FileName, ":", dstRecord.RecordNum)
 					return confirmedBlocksNum, nil
 				}
 			}
@@ -509,6 +511,7 @@ func (capi *ClientAPI) ConfirmOperation(operationRecord *rfslib.OperationRecord,
 	funcName := "ClientAPI.ConfirmOperation: "
 	block := capi.miner.getBlockFromLongestChain()
 	log.Println("FIRST")
+	operationRecord.MinerID = capi.miner.MinerID
 	confirmedBlocksNum, err := capi.miner.getOperationRecordHeight(block, *operationRecord)
 	log.Println("SECOND")
 	if err != nil {

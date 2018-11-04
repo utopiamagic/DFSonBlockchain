@@ -256,6 +256,7 @@ func (client *rfsClient) CreateFile(fname string) (err error) {
 		var minerRes MinerRes
 		err = client.Call("ClientAPI.ConfirmOperation", op, &minerRes)
 		log.Println("is confirmed...")
+		time.Sleep(1 * time.Second)
 		if err != nil {
 			if err == rpc.ErrShutdown {
 				// If the RPC connection was lost, return a rfslib.DisconnectedError.
