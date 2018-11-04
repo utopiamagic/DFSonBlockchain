@@ -748,7 +748,7 @@ func (m *Miner) requestPreviousBlocks(blockHash string) error {
 		})
 		if found {
 			m.chain.Store(blockHash, requestedBlock)
-			fmt.Println("requestPreviousBlocks successed:", requestedBlock.hash())
+			// fmt.Println("requestPreviousBlocks successed:", requestedBlock.hash())
 			requestedHash = requestedBlock.prevHash()
 			_, exists = m.chain.Load(requestedHash)
 		} else {
@@ -1166,6 +1166,7 @@ func (m *Miner) loadBlockChain() error {
 		m.peerMiners.Store(remoteMinerID, client)
 		remoteChainTips := make(map[string]int)
 		err = client.Call("MinerAPI.GetChainTips", m.MinerID+":initializeChains", &remoteChainTips)
+		log.Println("remoteChainTips", remoteChainTips)
 		if err == nil {
 			for remoteBlockHash, height := range remoteChainTips {
 				reqErr := m.requestPreviousBlocks(remoteBlockHash)
