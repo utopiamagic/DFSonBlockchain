@@ -13,6 +13,7 @@ package main
 
 import (
 	"crypto/md5"
+	"encoding/gob"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -215,6 +216,7 @@ func (mapi *MinerAPI) GetBlock(headerHash string, reply *Block) error {
 }
 
 func (m *Miner) addNode(minerInfo PeerMinerInfo) error {
+	log.Println("addNode: dialing", minerInfo.IncomingMinersAddr, "to", minerInfo.MinerID)
 	client, err := rpc.Dial("tcp", minerInfo.IncomingMinersAddr)
 	// client, err := vrpc.RPCDial("tcp", minerInfo.IncomingMinersAddr, m.Logger, m.GoVecOptions)
 	if err != nil {
@@ -1066,31 +1068,29 @@ func (m *Miner) generateBlocks() {
 // broadcastBlock broadcasts the block to all connected miners
 func (m *Miner) broadcastBlock(block Block) error {
 	calls := make([]*rpc.Call, 0, 100)
-	errStrings := make([]string, 0, 100)
+	remoteMinerIDs := make([]string, 0, 100)
+	failedCalls := make([]string, 0, 100)
 	m.peerMiners.Range(func(remoteMinerID, client interface{}) bool {
 		// Then it can make a remote asynchronous call
 		log.Println("broadcastBlock: to", remoteMinerID, block.hash(), "by", block.minerID())
 		reply := new(bool)
 		submitBlockCall := client.(*rpc.Client).Go("MinerAPI.SubmitBlock", block, reply, nil)
 		calls = append(calls, submitBlockCall)
+		remoteMinerIDs = append(remoteMinerIDs, block.minerID())
 		return true
 	})
 	for i, call := range calls {
 		// do something with e.Value
 		replyCall := <-call.Done // will be equal to divCall
-		if replyCall.Error == nil {
-			if replyCall.Reply == true {
-				continue
-			} else {
-				errStrings = append(errStrings, "submitBlockCall.Reply is false")
-			}
+		if replyCall.Error == nil && replyCall.Reply == true {
+			continue
 		} else {
-			errString := m.PeerMinersAddrs[i] + ": " + replyCall.Error.Error()
-			errStrings = append(errStrings, errString)
+			failedCalls = append(failedCalls, remoteMinerIDs[i])
 		}
 	}
-	if len(errStrings) > 0 {
-		return errors.New("broadcastBlock: one or multiple submitBlockCall failed")
+	if len(failedCalls) > 0 {
+		log.Println("broadcastBlock: ", failedCalls)
+		return errors.New("submitBlockCall failed" + string(len(failedCalls)) + " of " + string(len(calls)))
 	}
 	return nil
 }
@@ -1115,6 +1115,7 @@ func (m *Miner) broadcastOperationRecord(opRecord *rfslib.OperationRecord) error
 		}
 	}
 	if len(failedCalls) > 0 {
+		log.Println("broadcastOperationRecord: ", failedCalls)
 		return errors.New("submitBlockCall failed" + string(len(failedCalls)) + " of " + string(len(calls)))
 	}
 	return nil
@@ -1134,6 +1135,10 @@ func (m *Miner) initializeMiner(settings Settings) error {
 		log.Println(err)
 		return err
 	}
+	return nil
+}
+
+func (m *Miner) loadBlockChain() error {
 	for _, addr := range m.PeerMinersAddrs {
 		// client, err := vrpc.RPCDial("tcp", addr, m.Logger, m.GoVecOptions)
 		client, err := rpc.Dial("tcp", addr)
@@ -1145,7 +1150,11 @@ func (m *Miner) initializeMiner(settings Settings) error {
 		// Then make a remote call
 		remoteMinerID := "remoteMinerID"
 		var status bool
-		client.Call("MinerAPI.GetPeerInfo", m.MinerID+":initializeChains", &remoteMinerID)
+		err = client.Call("MinerAPI.GetPeerInfo", m.MinerID+":initializeChains", &remoteMinerID)
+		if err != nil {
+			log.Fatalln("initializeMiner:", err)
+		}
+		log.Println("initializeMiner: The remoteMinerID is", remoteMinerID)
 		err = client.Call("MinerAPI.AddNode", PeerMinerInfo{m.IncomingMinersAddr, m.MinerID}, &status)
 		if err != nil || status != true {
 			log.Fatalln("initializeMiner: ", err)
@@ -1263,11 +1272,25 @@ func main() {
 	}
 	fmt.Println("Loaded settings", settings)
 
+	gob.Register(OPBlock{})
+	gob.Register(NOPBlock{})
+	gob.Register(GenesisBlock{})
+
 	var miner Miner
 	err = miner.initializeMiner(settings)
 	if err != nil {
 		log.Fatalln("main: initializeMiner:", err)
 	}
+
+	go miner.serveMinerAPI()
+
+	time.Sleep(1 * time.Second)
+	err = miner.loadBlockChain()
+	if err != nil {
+		log.Fatalln("main: loadBlockChain:", err)
+	}
+
+	go miner.serveClientAPI()
 
 	//Initalize GoVector
 	// options := govec.GetDefaultLogOptions()
@@ -1276,10 +1299,6 @@ func main() {
 	// config.UseTimestamps = true
 	// logger := govec.InitGoVector("MinerProcess", "Miner-"+miner.MinerID, config)
 	// miner.Logger = logger
-
-	go miner.serveClientAPI()
-
-	go miner.serveMinerAPI()
 
 	miner.generateBlocks()
 
