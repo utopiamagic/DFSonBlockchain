@@ -1061,6 +1061,7 @@ func (m *Miner) generateBlocks() {
 			for k := range recordsMap {
 				records = append(records, k)
 			}
+			recordsMap = make(map[rfslib.OperationRecord]bool)
 			go m.computeOPBlock(records)
 			generatingOPBlock = true
 		}
