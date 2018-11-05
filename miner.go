@@ -531,9 +531,9 @@ func (capi *ClientAPI) SubmitRecord(newOpRecord *rfslib.OperationRecord, res *rf
 				Data:   newOpRecord.RecordNum,
 			}
 		}
-		return nil
 	}
 	newOpRecord.MinerID = capi.miner.MinerID
+	log.Println("chan < submitrecord ")
 	capi.miner.OperationRecordChan <- *newOpRecord
 	capi.miner.broadcastOperationRecord(newOpRecord)
 	*res = rfslib.MinerRes{
