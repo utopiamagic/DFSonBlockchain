@@ -34,6 +34,9 @@ import (
 
 func init() {
 	gob.Register(rfslib.OperationRecord{})
+	gob.Register(OPBlock{})
+	gob.Register(NOPBlock{})
+	gob.Register(GenesisBlock{})
 }
 
 // NOPBlockType is ...
@@ -230,7 +233,7 @@ func loadBlock(packet BlockPacket) (Block, error) {
 		if err != nil {
 			return block, err
 		}
-		log.Println("loadBlock: Unmarshalled a OPBlock", opBlock.hash())
+		// log.Println("loadBlock: Unmarshalled a OPBlock", opBlock.hash())
 		block = opBlock
 	case NOPBlockType:
 		var nopBlock NOPBlock
@@ -238,7 +241,7 @@ func loadBlock(packet BlockPacket) (Block, error) {
 		if err != nil {
 			return block, err
 		}
-		log.Println("loadBlock: Unmarshalled a NOPBlock", nopBlock.hash())
+		// log.Println("loadBlock: Unmarshalled a NOPBlock", nopBlock.hash())
 		block = nopBlock
 	default:
 		return block, errors.New("SubmitBlock: block type in packet not supported")
@@ -569,8 +572,8 @@ func (m *Miner) getOperationRecordHeight(block Block, srcRecord rfslib.Operation
 		case OPBlock:
 			log.Println(funcName, "OPBlock", block.hash())
 			for _, dstRecord := range t.Records {
-				log.Println(funcName, confirmedBlocksNum, srcRecord.MinerID, srcRecord.OperationType, srcRecord.RecordNum)
-				log.Println(funcName, confirmedBlocksNum, dstRecord.MinerID, dstRecord.OperationType, dstRecord.RecordNum)
+				// log.Println(funcName, confirmedBlocksNum, srcRecord.MinerID, srcRecord.OperationType, srcRecord.RecordNum)
+				// log.Println(funcName, confirmedBlocksNum, dstRecord.MinerID, dstRecord.OperationType, dstRecord.RecordNum)
 				if cmp.Equal(srcRecord, dstRecord) {
 					log.Println(funcName, confirmedBlocksNum, dstRecord.FileName, ":", dstRecord.RecordNum)
 					return confirmedBlocksNum, nil
@@ -739,6 +742,7 @@ func (m *Miner) readRecord(fname string, recordNum uint16) (rfslib.OperationReco
 							return opRecord, nil
 						}
 					case "append":
+						log.Println(opRecord.FileName, opRecord.RecordNum, m.ConfirmsPerFileAppend, "<", confirmedBlocksNum)
 						// if we can find the tail record of the file
 						if opRecord.FileName == fname && int(m.ConfirmsPerFileAppend) < confirmedBlocksNum {
 							if recordNum >= opRecord.RecordNum {
@@ -851,7 +855,7 @@ func (m *Miner) updateChainTip(newBlock Block) error {
 		inChainTips := false
 		currentHeight := 0
 		m.chainTips.Range(func(blockHash, height interface{}) bool {
-			log.Println("chaintip:", blockHash.(string))
+			// log.Println("chaintip:", blockHash, height)
 			if blockHash.(string) == prevBlock.(Block).hash() {
 				inChainTips = true
 				currentHeight = height.(int)
@@ -1174,8 +1178,8 @@ func (m *Miner) broadcastBlock(block Block) error {
 	failedCalls := make([]string, 0, 100)
 	var packet BlockPacket
 	err := dumpBlock(block, &packet)
-	anotherBlock, _ := loadBlock(packet)
-	log.Println("broadcastBlock:", "submitted", anotherBlock.hash())
+	// anotherBlock, _ := loadBlock(packet)
+	// log.Println("broadcastBlock:", "submitted", anotherBlock.hash())
 	if err != nil {
 		return err
 	}
@@ -1391,10 +1395,6 @@ func main() {
 		log.Fatalln(err)
 	}
 	fmt.Println("Loaded settings", settings)
-
-	gob.Register(OPBlock{})
-	gob.Register(NOPBlock{})
-	gob.Register(GenesisBlock{})
 
 	var miner Miner
 	err = miner.initializeMiner(settings)
