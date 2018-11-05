@@ -230,6 +230,7 @@ func loadBlock(packet BlockPacket) (Block, error) {
 		if err != nil {
 			return block, err
 		}
+		log.Println("loadBlock: Unmarshalled a OPBlock", opBlock.hash())
 		block = opBlock
 	case NOPBlockType:
 		var nopBlock NOPBlock
@@ -237,6 +238,7 @@ func loadBlock(packet BlockPacket) (Block, error) {
 		if err != nil {
 			return block, err
 		}
+		log.Println("loadBlock: Unmarshalled a NOPBlock", nopBlock.hash())
 		block = nopBlock
 	default:
 		return block, errors.New("SubmitBlock: block type in packet not supported")
@@ -369,7 +371,10 @@ func (m *Miner) validateBlock(block Block) error {
 		// Check that the previous block hash points to a legal, previously generated, block.
 		prevBlock, prevBlockExists := m.chain.Load(t.PrevHash)
 		if !prevBlockExists {
-			return errors.New("validateBlock: OPBlock " + t.hash() + " does not have a previous block")
+			err := m.requestPreviousBlocks(t.PrevHash)
+			if err != nil {
+				return errors.New("validateBlock: OPBlock " + t.hash() + " does not have a previous block")
+			}
 		}
 
 		// Operation validations:
@@ -402,13 +407,17 @@ func (m *Miner) validateBlock(block Block) error {
 		break
 	case NOPBlock:
 		if validateNonce(t, m.PowPerNoOpBlock) == false {
-			return errors.New("validateBlock: NOPBlock " + t.hash() + " does not have the right difficulty")
+			log.Println(t.hash(), "PowPerNoOpBlock", m.PowPerNoOpBlock)
+			return errors.New("validateBlock: NOPBlock " + t.hash() + " does not have the right difficulty :" + string(m.PowPerNoOpBlock))
 		}
 		// Check that the previous block hash points to a legal, previously generated, block.
 		if _, ok := m.chain.Load(t.PrevHash); ok {
 			// fmt.Println("validateBlock: the previous block of this NOPBlock is:", t.prevHash())
 		} else {
-			return errors.New("validateBlock: NOPBlock " + t.hash() + " does not have a previous block " + t.prevHash())
+			err := m.requestPreviousBlocks(t.PrevHash)
+			if err != nil {
+				return errors.New("validateBlock: NOPBlock " + t.hash() + " does not have a previous block " + t.prevHash())
+			}
 		}
 		break
 	case GenesisBlock:
@@ -460,7 +469,6 @@ func (mapi *MinerAPI) SubmitRecord(newOpRecord *rfslib.OperationRecord, nextReco
 		}
 	}
 	mapi.miner.OperationRecordChan <- *newOpRecord
-	mapi.miner.broadcastOperationRecord(newOpRecord)
 	return nil
 }
 
@@ -537,7 +545,6 @@ func (capi *ClientAPI) SubmitRecord(newOpRecord *rfslib.OperationRecord, res *rf
 	newOpRecord.MinerID = capi.miner.MinerID
 	log.Println("chan < submitrecord ")
 	capi.miner.OperationRecordChan <- *newOpRecord
-	capi.miner.broadcastOperationRecord(newOpRecord)
 	*res = rfslib.MinerRes{
 		HasErr: false,
 		Data:   newOpRecord.RecordNum,
@@ -780,7 +787,7 @@ func (m *Miner) getHeight(block Block) (int, error) {
 		return 1, nil
 	}
 	// OPBlock, NOPBlock case
-	prevBlock, exists := m.chain.Load(block.hash())
+	prevBlock, exists := m.chain.Load(block.prevHash())
 	if exists {
 		prevHeight, err := m.getHeight(prevBlock.(Block))
 		if err == nil {
@@ -837,7 +844,7 @@ func (m *Miner) updateChainTip(newBlock Block) error {
 		inChainTips := false
 		currentHeight := 0
 		m.chainTips.Range(func(blockHash, height interface{}) bool {
-			// log.Println("chaintip:", blockHash.(string))
+			log.Println("chaintip:", blockHash.(string))
 			if blockHash.(string) == prevBlock.(Block).hash() {
 				inChainTips = true
 				currentHeight = height.(int)
@@ -856,6 +863,8 @@ func (m *Miner) updateChainTip(newBlock Block) error {
 			prevHeight, err := m.getHeight(prevBlock.(Block))
 			if err == nil {
 				m.chainTips.Store(newBlock.hash(), prevHeight+1)
+				// TODO: be aware of possible side effects
+				// m.chainTips.Delete(newBlock.prevHash())
 			} else {
 				// ask other miners for the previous block?
 				return err
@@ -935,6 +944,7 @@ func (mapi *MinerAPI) SubmitBlock(packet BlockPacket, received *bool) error {
 	if err != nil {
 		return err
 	}
+	log.Println("SubmitBlock received a block", block.hash(), "from", block.minerID(), "with prevHash", block.prevHash())
 	err = mapi.miner.addBlock(block)
 	if err == nil {
 		err = mapi.miner.broadcastBlock(block)
@@ -1064,6 +1074,7 @@ func (m *Miner) computeOPBlock(records []rfslib.OperationRecord) {
 		default:
 			opBlock = OPBlock{prevHash, records, nonce, m.MinerID, newBalance}
 			if validateNonce(opBlock, m.PowPerOpBlock) == true {
+				log.Println("Generated OPBlock", opBlock.hash())
 				m.GeneratedBlocksChan <- opBlock
 				return
 			}
@@ -1120,23 +1131,23 @@ func (m *Miner) generateBlocks() {
 			if wasActive := opBlockTimer.Stop(); !wasActive {
 				opBlockTimer.Reset(time.Duration(m.GenOpBlockTimeout) * time.Millisecond)
 				if generatingNOPBlock {
-					m.StopMiningChan <- "generateBlocks(newRecord, NOPBlock)"
+					m.StopMiningChan <- "generateBlocks(newRecord, OPBlock)"
 					generatingNOPBlock = false
 					generatingOPBlock = true
 				}
 			}
 			if _, ok := recordsMap[operationRecord]; !ok {
 				recordsMap[operationRecord] = true
+				// only if the record hasn't been processed yet did we add it to our chain
+				go m.broadcastOperationRecord(&operationRecord)
+			} else {
+				recordsMap[operationRecord] = false
 			}
 		case <-opBlockTimer.C:
+			log.Printf("generateBlocks: accumulated enough recs; start mining OPBlocks...")
 			if generatingNOPBlock {
 				log.Panicf("generateBlocks: we should not be working on NOPBlocks by now")
 			}
-			/*
-				if generatingOPBlock {
-					log.Printf("generateBlocks: we should not be working on OPBlocks by now; WHY DID IT HAPPEN")
-					m.StopMiningChan <- "generateBlocks(timedOut, OPBlock)"
-				}*/
 			records := make([]rfslib.OperationRecord, 0, len(recordsMap))
 			for k, v := range recordsMap {
 				if v == true {
@@ -1152,8 +1163,7 @@ func (m *Miner) generateBlocks() {
 
 // broadcastBlock broadcasts the block to all connected miners
 func (m *Miner) broadcastBlock(block Block) error {
-	calls := make([]*rpc.Call, 0, 100)
-	remoteMinerIDs := make([]string, 0, 100)
+	// remoteMinerIDs := make([]string, 0, 100)
 	failedCalls := make([]string, 0, 100)
 	var packet BlockPacket
 	err := dumpBlock(block, &packet)
@@ -1164,47 +1174,40 @@ func (m *Miner) broadcastBlock(block Block) error {
 		// Then it can make a remote asynchronous call
 		log.Println("broadcastBlock: to", remoteMinerID, block.hash(), "by", block.minerID())
 		reply := new(bool)
-		submitBlockCall := client.(*rpc.Client).Go("MinerAPI.SubmitBlock", packet, reply, nil)
-		calls = append(calls, submitBlockCall)
-		remoteMinerIDs = append(remoteMinerIDs, block.minerID())
+		log.Println("broadcastBlock:", "before done")
+		err = client.(*rpc.Client).Call("MinerAPI.SubmitBlock", packet, reply)
+		log.Println("broadcastBlock:", "after done")
+		if err != nil {
+			if err == rpc.ErrShutdown {
+				m.peerMiners.Delete(remoteMinerID)
+			}
+			failedCalls = append(failedCalls, remoteMinerID.(string))
+		}
 		return true
 	})
-	for i, call := range calls {
-		// do something with e.Value
-		replyCall := <-call.Done // will be equal to divCall
-		if replyCall.Error == nil && replyCall.Reply == true {
-			continue
-		} else {
-			log.Println("broadcastBlock: to", remoteMinerIDs[i], replyCall.Error)
-			failedCalls = append(failedCalls, remoteMinerIDs[i])
-		}
-	}
 	if len(failedCalls) > 0 {
 		log.Println("broadcastBlock: failedCalls", failedCalls)
-		return errors.New("submitBlockCall failed" + string(len(failedCalls)) + " of " + string(len(calls)))
+		return errors.New("submitBlockCall failed" + string(len(failedCalls)))
 	}
 	return nil
 }
 
 func (m *Miner) broadcastOperationRecord(opRecord *rfslib.OperationRecord) error {
-	calls := make(map[string]*rpc.Call)
+	calls := make(map[string]bool)
 	failedCalls := make([]string, 0, 100)
 	m.peerMiners.Range(func(remoteMinerID, client interface{}) bool {
 		nextRecordID := new(uint16)
-		submitRecordCall := client.(*rpc.Client).Go("MinerAPI.SubmitRecord", opRecord, nextRecordID, nil)
+		err := client.(*rpc.Client).Call("MinerAPI.SubmitRecord", opRecord, nextRecordID)
+		if err != nil {
+			if err == rpc.ErrShutdown {
+				m.peerMiners.Delete(remoteMinerID)
+			}
+			failedCalls = append(failedCalls, remoteMinerID.(string))
+		}
 		log.Println("broadcastOperationRecord:", opRecord.FileName, opRecord.RecordNum)
-		calls[remoteMinerID.(string)] = submitRecordCall
+		calls[remoteMinerID.(string)] = true
 		return true
 	})
-	for remoteMinerID, call := range calls {
-		// do something with e.Value
-		replyCall := <-call.Done // will be equal to divCall
-		if replyCall.Error == nil && replyCall.Reply == true {
-			continue
-		} else {
-			failedCalls = append(failedCalls, remoteMinerID)
-		}
-	}
 	if len(failedCalls) > 0 {
 		log.Println("broadcastOperationRecord: ", failedCalls)
 		return errors.New("submitBlockCall failed" + string(len(failedCalls)) + " of " + string(len(calls)))
