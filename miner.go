@@ -370,12 +370,19 @@ func (m *Miner) validateBlock(block Block) error {
 		}
 		// Check that the previous block hash points to a legal, previously generated, block.
 		prevBlock, prevBlockExists := m.chain.Load(t.PrevHash)
+
 		if !prevBlockExists {
 			err := m.requestPreviousBlocks(t.PrevHash)
 			if err != nil {
 				return errors.New("validateBlock: OPBlock " + t.hash() + " does not have a previous block")
 			}
+			prevBlock, prevBlockExists = m.chain.Load(t.PrevHash)
+			if !prevBlockExists {
+				return errors.New("validateBlock: OPBlock " + t.hash() + " belongs to an orphaned chain :(")
+			}
 		}
+		log.Println("validateBlock: OPBlock has prevHash", t.PrevHash)
+		prevOPBlock := prevBlock.(Block)
 
 		// Operation validations:
 		// Check that each operation in the block is associated with a miner ID that has enough record coins to pay for the operation
@@ -400,7 +407,7 @@ func (m *Miner) validateBlock(block Block) error {
 		// Check that each operation does not violate RFS semantics
 		// (e.g., a record is not mutated or inserted into the middled of an rfs file).
 		for _, opRecord := range t.Records {
-			if err := m.validateRecordSemantics(prevBlock.(Block), opRecord); err != nil {
+			if err := m.validateRecordSemantics(prevOPBlock, opRecord); err != nil {
 				return err
 			}
 		}
@@ -941,9 +948,6 @@ func (m *Miner) addBlock(block Block) error {
 func (mapi *MinerAPI) SubmitBlock(packet BlockPacket, received *bool) error {
 	*received = true
 	block, err := loadBlock(packet)
-	if block == nil {
-		log.Panicln("SubmitBlock: block == nil")
-	}
 	if err != nil {
 		return err
 	}
@@ -1170,6 +1174,8 @@ func (m *Miner) broadcastBlock(block Block) error {
 	failedCalls := make([]string, 0, 100)
 	var packet BlockPacket
 	err := dumpBlock(block, &packet)
+	anotherBlock, _ := loadBlock(packet)
+	log.Println("broadcastBlock:", "submitted", anotherBlock.hash())
 	if err != nil {
 		return err
 	}
@@ -1177,9 +1183,7 @@ func (m *Miner) broadcastBlock(block Block) error {
 		// Then it can make a remote asynchronous call
 		log.Println("broadcastBlock: to", remoteMinerID, block.hash(), "by", block.minerID())
 		reply := new(bool)
-		log.Println("broadcastBlock:", "before done")
 		err = client.(*rpc.Client).Call("MinerAPI.SubmitBlock", packet, reply)
-		log.Println("broadcastBlock:", "after done")
 		if err != nil {
 			if err == rpc.ErrShutdown {
 				m.peerMiners.Delete(remoteMinerID)
