@@ -938,6 +938,9 @@ func (m *Miner) addBlock(block Block) error {
 func (mapi *MinerAPI) SubmitBlock(packet BlockPacket, received *bool) error {
 	*received = true
 	block, err := loadBlock(packet)
+	if block == nil {
+		log.Panicln("SubmitBlock: block == nil")
+	}
 	if err != nil {
 		return err
 	}
