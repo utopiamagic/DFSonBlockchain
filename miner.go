@@ -32,6 +32,10 @@ import (
 	"github.ugrad.cs.ubc.ca/CPSC416-2018W-T1/P1-i8b0b-e8y0b/rfslib"
 )
 
+func init() {
+	gob.Register(rfslib.OperationRecord{})
+}
+
 // NOPBlockType is ...
 const (
 	NOPBlockType = iota
@@ -490,6 +494,8 @@ func (capi *ClientAPI) ReadRecord(recordInfo *rfslib.OperationRecord, minerRes *
 		Data:   opRecord,
 		HasErr: false,
 	}
+
+	log.Printf("%v\n", *minerRes)
 	return nil
 }
 
@@ -534,10 +540,6 @@ func (capi *ClientAPI) SubmitRecord(newOpRecord *rfslib.OperationRecord, res *rf
 		}
 		if newOpRecord.RecordNum == 0 {
 			newOpRecord.RecordNum = mostRecentRecord.RecordNum + 1
-			*res = rfslib.MinerRes{
-				HasErr: false,
-				Data:   newOpRecord.RecordNum,
-			}
 		}
 	}
 	newOpRecord.MinerID = capi.miner.MinerID
@@ -545,6 +547,7 @@ func (capi *ClientAPI) SubmitRecord(newOpRecord *rfslib.OperationRecord, res *rf
 	capi.miner.OperationRecordChan <- *newOpRecord
 	*res = rfslib.MinerRes{
 		HasErr: false,
+		Data:   newOpRecord.RecordNum,
 	}
 	return nil
 }

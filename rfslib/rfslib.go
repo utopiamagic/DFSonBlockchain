@@ -10,6 +10,7 @@ it.
 package rfslib
 
 import (
+	"encoding/gob"
 	"errors"
 	"fmt"
 	"log"
@@ -25,6 +26,10 @@ const (
 	FileDoesNotExist
 	FileMaxLenReached
 )
+
+func init() {
+	gob.Register(OperationRecord{})
+}
 
 // A Record is the unit of file access (reading/appending) in RFS.
 type Record [512]byte
@@ -392,7 +397,7 @@ func (client *rfsClient) ReadRec(fname string, recordNum uint16, record *Record)
 
 	for {
 		log.Printf("asking miner to read record of file %s at position %d...\n", fname, recordNum)
-		var minerRes *MinerRes
+		var minerRes MinerRes
 		err = client.Call("ClientAPI.ReadRecord", op, &minerRes)
 		if err != nil {
 			if err == rpc.ErrShutdown {
