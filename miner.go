@@ -340,14 +340,19 @@ func (m *Miner) validateRecordSemantics(block Block, opRecord rfslib.OperationRe
 				}
 			case "append":
 				for _, prevRecord := range t.Records {
+					log.Println("encountered", prevRecord)
+					if prevRecord.FileName != opRecord.FileName {
+						continue
+					}
 					if currentRecordNum == prevRecord.RecordNum+1 {
 						currentRecordNum = prevRecord.RecordNum
-						if currentRecordNum == 0 {
+						if currentRecordNum == 1 {
 							// TODO: decide the initial record num for append
 							return nil
 						}
 					} else {
-						return errors.New(funcName + "encountered (inserted into the middled of an rfs file)")
+						return fmt.Errorf("toAppend %d tail %d (inserted into the middle)", currentRecordNum, prevRecord.RecordNum)
+						// errors.New(funcName + "encountered (inserted into the middled of an rfs file)")
 					}
 				}
 			default:
@@ -385,7 +390,7 @@ func (m *Miner) validateBlock(block Block) error {
 			}
 		}
 		log.Println("validateBlock: OPBlock has prevHash", t.PrevHash)
-		prevOPBlock := prevBlock.(Block)
+		prevChainTip := prevBlock.(Block)
 
 		// Operation validations:
 		// Check that each operation in the block is associated with a miner ID that has enough record coins to pay for the operation
@@ -410,7 +415,7 @@ func (m *Miner) validateBlock(block Block) error {
 		// Check that each operation does not violate RFS semantics
 		// (e.g., a record is not mutated or inserted into the middled of an rfs file).
 		for _, opRecord := range t.Records {
-			if err := m.validateRecordSemantics(prevOPBlock, opRecord); err != nil {
+			if err := m.validateRecordSemantics(prevChainTip, opRecord); err != nil {
 				return err
 			}
 		}
@@ -418,7 +423,7 @@ func (m *Miner) validateBlock(block Block) error {
 	case NOPBlock:
 		if validateNonce(t, m.PowPerNoOpBlock) == false {
 			log.Println(t.hash(), "PowPerNoOpBlock", m.PowPerNoOpBlock)
-			return errors.New("validateBlock: NOPBlock " + t.hash() + " does not have the right difficulty :" + string(m.PowPerNoOpBlock))
+			return fmt.Errorf("validateBlock: NOPBlock %s does not have the right difficulty %d", t.hash(), m.PowPerNoOpBlock)
 		}
 		// Check that the previous block hash points to a legal, previously generated, block.
 		if _, ok := m.chain.Load(t.PrevHash); ok {
@@ -426,7 +431,7 @@ func (m *Miner) validateBlock(block Block) error {
 		} else {
 			err := m.requestPreviousBlocks(t.PrevHash)
 			if err != nil {
-				return errors.New("validateBlock: NOPBlock " + t.hash() + " does not have a previous block " + t.prevHash())
+				return fmt.Errorf("validateBlock: NOPBlock %s does not have a previous block %s", t.hash(), t.prevHash())
 			}
 		}
 		break
@@ -456,7 +461,7 @@ func (mapi *MinerAPI) SubmitRecord(newOpRecord *rfslib.OperationRecord, nextReco
 	funcName := "MinerAPI.SubmitRecord: "
 	block := mapi.miner.getBlockFromLongestChain()
 
-	log.Println(funcName, newOpRecord.OperationType, newOpRecord.FileName)
+	log.Println(funcName, "recv", newOpRecord.OperationType, newOpRecord.FileName, newOpRecord.RecordData)
 
 	balance, err := mapi.miner.getBalance(block, newOpRecord.MinerID)
 	if err != nil {
@@ -464,6 +469,7 @@ func (mapi *MinerAPI) SubmitRecord(newOpRecord *rfslib.OperationRecord, nextReco
 	}
 	err = mapi.miner.validateRecordSemantics(block, *newOpRecord)
 	if err != nil {
+		log.Println(funcName, "err", err)
 		return errors.New(funcName + err.Error())
 	}
 	switch newOpRecord.OperationType {
@@ -478,6 +484,7 @@ func (mapi *MinerAPI) SubmitRecord(newOpRecord *rfslib.OperationRecord, nextReco
 			return errors.New(funcName + "the current balance is not enough to cover append")
 		}
 	}
+	log.Println(funcName, "chan", newOpRecord.OperationType, newOpRecord.FileName, newOpRecord.RecordData)
 	mapi.miner.OperationRecordChan <- *newOpRecord
 	return nil
 }
@@ -512,10 +519,9 @@ func (capi *ClientAPI) ReadRecord(recordInfo *rfslib.OperationRecord, minerRes *
 // SubmitRecord RPC (call from ClientAPI) submits operationRecord to the miner network
 // if the mined coins are sufficient to cover the cost
 func (capi *ClientAPI) SubmitRecord(newOpRecord *rfslib.OperationRecord, res *rfslib.MinerRes) error {
-	log.Println("received submitrecord call")
 	block := capi.miner.getBlockFromLongestChain()
 	funcName := "ClientAPI.SubmitRecord: "
-	log.Println(funcName, newOpRecord.OperationType, newOpRecord.FileName)
+	log.Println(funcName, "recv", newOpRecord.OperationType, newOpRecord.FileName, newOpRecord.RecordData)
 	balance, err := capi.miner.getBalance(block, capi.miner.MinerID)
 	if err != nil {
 		return errors.New(funcName + "checking balanceRequired:" + err.Error())
@@ -540,8 +546,10 @@ func (capi *ClientAPI) SubmitRecord(newOpRecord *rfslib.OperationRecord, res *rf
 		// We assume that the previous records are confirmed before a client append a new one
 		mostRecentRecord, err := capi.miner.readRecord(newOpRecord.FileName, 65535)
 		if err != nil {
-			log.Fatalln(funcName, "find record number:", err)
-			return err
+			*res = rfslib.MinerRes{
+				HasErr: true,
+				Error:  rfslib.FileDoesNotExist,
+			}
 		}
 		if mostRecentRecord.RecordNum == 65535 {
 			*res = rfslib.MinerRes{
@@ -549,8 +557,9 @@ func (capi *ClientAPI) SubmitRecord(newOpRecord *rfslib.OperationRecord, res *rf
 				Error:  rfslib.FileMaxLenReached,
 			}
 		}
-		if newOpRecord.RecordNum == 0 {
+		if newOpRecord.RecordNum == 0 && newOpRecord.OperationType == "append" {
 			newOpRecord.RecordNum = mostRecentRecord.RecordNum + 1
+			log.Println(funcName, "assigning new RecordNum =", newOpRecord.RecordNum)
 		}
 	}
 	newOpRecord.MinerID = capi.miner.MinerID
@@ -573,8 +582,8 @@ func (m *Miner) getOperationRecordHeight(block Block, srcRecord rfslib.Operation
 		case OPBlock:
 			// log.Println(funcName, "OPBlock", block.hash())
 			for _, dstRecord := range t.Records {
-				// log.Println(funcName, confirmedBlocksNum, srcRecord.MinerID, srcRecord.OperationType, srcRecord.RecordNum)
-				// log.Println(funcName, confirmedBlocksNum, dstRecord.MinerID, dstRecord.OperationType, dstRecord.RecordNum)
+				log.Println(funcName, confirmedBlocksNum, srcRecord.MinerID, srcRecord.OperationType, srcRecord.RecordNum)
+				log.Println(funcName, confirmedBlocksNum, dstRecord.MinerID, dstRecord.OperationType, dstRecord.RecordNum)
 				if cmp.Equal(srcRecord, dstRecord) {
 					log.Println(funcName, confirmedBlocksNum, dstRecord.FileName, ":", dstRecord.RecordNum)
 					return confirmedBlocksNum, nil
@@ -591,7 +600,7 @@ func (m *Miner) getOperationRecordHeight(block Block, srcRecord rfslib.Operation
 		}
 		block = prevBlock.(Block)
 	}
-	return -1, errors.New(funcName + "OperationRecord" + srcRecord.FileName + " " + string(srcRecord.RecordNum) + "cannot be found")
+	return -1, fmt.Errorf("%s Record %s %d cannot be found", funcName, srcRecord.FileName, srcRecord.RecordNum)
 }
 
 // ConfirmOperation RPC should be invoked by the RFS Client
@@ -606,7 +615,7 @@ func (capi *ClientAPI) ConfirmOperation(operationRecord *rfslib.OperationRecord,
 		log.Println(funcName, err)
 		return err
 	}
-	log.Println(funcName, confirmedBlocksNum, operationRecord.FileName)
+	log.Println(funcName, confirmedBlocksNum, operationRecord)
 	switch operationRecord.OperationType {
 	default:
 		return errors.New("Operation Type not recognized")
@@ -714,31 +723,47 @@ func (m *Miner) countRecords(fname string) (uint16, error) {
 	return 0, rfslib.FileDoesNotExistError(fmt.Sprintf("miner with id %s could not find file %s\n", m.MinerID, fname))
 }
 
-// readRecord returns if the closet unconfirmed matching record exists
-func (m *Miner) hasRecord(fname string, recordNum uint16) bool {
+// hasRecord returns if the closet unconfirmed matching record exists
+func (m *Miner) hasRecord(toBeFound rfslib.OperationRecord) bool {
+	var confirmedBlocksNum, requiredBlocksNum uint8
+	switch toBeFound.OperationType {
+	case "append":
+		requiredBlocksNum = m.ConfirmsPerFileAppend
+	case "create":
+		requiredBlocksNum = m.ConfirmsPerFileCreate
+	default:
+		break
+	}
 	block := m.getBlockFromLongestChain()
-	// funcName := "hasRecord: "
+	funcName := "hasRecord: "
 	for block.hash() != block.prevHash() {
 		prevBlock, ok := m.chain.Load(block.prevHash())
 		if !ok {
+			log.Fatalln(funcName, "encountered an orphaned block")
 			return false
+		}
+		confirmedBlocksNum++
+		if confirmedBlocksNum < requiredBlocksNum {
+			block = prevBlock.(Block)
+			continue
 		}
 		switch t := block.(type) {
 		case NOPBlock:
 			break
 		case OPBlock:
-			for _, opRecord := range t.Records {
-				if opRecord.FileName == fname {
-					switch opRecord.OperationType {
+			for _, currentRecord := range t.Records {
+				if currentRecord.FileName == toBeFound.FileName {
+					switch currentRecord.OperationType {
 					case "create":
-						// if we can find the header of the file and the header is confirmed...
+						// if we can find the header of the file and the header is confirmed then we are set
 						// (observation: if we are here then the appended blocks are not confirmed yet)
-						if opRecord.FileName == fname && recordNum == 0 {
+						if toBeFound.RecordNum == 0 {
 							return true
 						}
 					case "append":
 						// if we can find the tail record of the file
-						if opRecord.FileName == fname && recordNum >= opRecord.RecordNum {
+						log.Println("toBeFound", toBeFound.RecordNum, currentRecord.RecordNum, requiredBlocksNum)
+						if toBeFound.RecordNum <= currentRecord.RecordNum {
 							return true
 						}
 					default:
@@ -747,6 +772,7 @@ func (m *Miner) hasRecord(fname string, recordNum uint16) bool {
 				}
 			}
 		default:
+			log.Fatalln(funcName, "encountered an unreognized block")
 			return false
 		}
 		block = prevBlock.(Block)
@@ -783,10 +809,12 @@ func (m *Miner) readRecord(fname string, recordNum uint16) (rfslib.OperationReco
 							return opRecord, nil
 						}
 					case "append":
-						log.Println(opRecord.FileName, opRecord.RecordNum, m.ConfirmsPerFileAppend, "<", confirmedBlocksNum)
+						log.Println(opRecord.FileName, opRecord.RecordNum, opRecord.OperationType)
 						// if we can find the tail record of the file
 						if opRecord.FileName == fname && int(m.ConfirmsPerFileAppend) < confirmedBlocksNum {
+							log.Println("readRecord: requesting", recordNum, "has", opRecord.RecordNum)
 							if recordNum >= opRecord.RecordNum {
+								log.Println("readRecord: recordNum >= opRecord.RecordNum")
 								return opRecord, nil
 							}
 						}
@@ -999,7 +1027,7 @@ func (mapi *MinerAPI) SubmitBlock(packet BlockPacket, received *bool) error {
 	log.Println("SubmitBlock received a block", block.hash(), "from", block.minerID(), "with prevHash", block.prevHash())
 	err = mapi.miner.addBlock(block)
 	if err == nil {
-		err = mapi.miner.broadcastBlock(block)
+		go mapi.miner.broadcastBlock(block)
 	}
 	return err
 }
@@ -1053,7 +1081,7 @@ func (m *Miner) getBlockFromLongestChain() Block {
 	if longestChainTip == nil {
 		log.Panicln("getBlockFromLongestChain: longestChainTip is nil")
 	}
-	log.Println("chaintip:", longestChainTip.hash(), maxBlocksNum)
+	// log.Println("chaintip:", longestChainTip.hash(), maxBlocksNum)
 	return longestChainTip
 }
 
@@ -1147,11 +1175,12 @@ func (m *Miner) generateBlocks() {
 	recordsMap := make(map[rfslib.OperationRecord]bool)
 	generatingNOPBlock := false
 	generatingOPBlock := false
+	collectingRecords := false
 	for {
 		select {
 		default:
-			if !generatingNOPBlock && !generatingOPBlock {
-				// log.Println("generateBlocks: mining NOPBlock")
+			if !generatingNOPBlock && !generatingOPBlock && !collectingRecords {
+				log.Println("generateBlocks: mining NOPBlock")
 				go m.computeNOPBlock()
 				generatingNOPBlock = true
 			}
@@ -1164,7 +1193,7 @@ func (m *Miner) generateBlocks() {
 				if generatingOPBlock {
 					generatingOPBlock = false
 				}
-				break
+				continue
 			}
 			switch t := generatedBlock.(type) {
 			case NOPBlock:
@@ -1178,46 +1207,55 @@ func (m *Miner) generateBlocks() {
 			default:
 				log.Fatalln("generateBlocks: received the generated block of some other type")
 			}
+			// pendingRecords := make([]rfslib.OperationRecord, 0, 100)
+			for opRecord, needsConfirm := range recordsMap {
+				if !needsConfirm {
+					continue
+				}
+				if m.hasRecord(opRecord) {
+					log.Println("generateBlocks: this record can be confirmed:", opRecord)
+					recordsMap[opRecord] = false
+				}
+			}
 		// we have received a new record
 		case operationRecord := <-m.OperationRecordChan:
-			log.Println("generateBlocks: received the generated operationRecord", operationRecord.FileName, operationRecord.MinerID)
+			log.Println("generateBlocks: received OperationRecord", operationRecord.FileName, operationRecord.MinerID)
 			if wasActive := opBlockTimer.Stop(); !wasActive {
 				opBlockTimer.Reset(time.Duration(m.GenOpBlockTimeout) * time.Millisecond)
 				if generatingNOPBlock {
 					m.StopMiningChan <- "generateBlocks(newRecord, OPBlock)"
 					generatingNOPBlock = false
-					generatingOPBlock = true
 				}
+				collectingRecords = true
 			}
 			if _, ok := recordsMap[operationRecord]; !ok {
 				recordsMap[operationRecord] = true
 				// only if the record hasn't been processed yet did we add it to our chain
 				go m.broadcastOperationRecord(&operationRecord)
-			} else {
-				recordsMap[operationRecord] = false
-				if !m.hasRecord(operationRecord.FileName, operationRecord.RecordNum) {
-					if !generatingOPBlock {
-						recordsMap[operationRecord] = true
-						go m.broadcastOperationRecord(&operationRecord)
-					} else {
-						opBlockTimer.Stop()
-					}
-
-				}
 			}
 		case <-opBlockTimer.C:
 			log.Printf("generateBlocks: accumulated enough recs; start mining OPBlocks...")
 			if generatingNOPBlock {
 				log.Panicf("generateBlocks: we should not be working on NOPBlocks by now")
 			}
-			records := make([]rfslib.OperationRecord, 0, len(recordsMap))
+			block := m.getBlockFromLongestChain()
+			records := make([]rfslib.OperationRecord, 0, 100)
 			for k, v := range recordsMap {
 				if v == true {
-					records = append(records, k)
-					recordsMap[k] = false
+					err := m.validateRecordSemantics(block, k)
+					// only these records that do not cause any semantics error would be added
+					// for those that are not confirmed we will postponse remining them
+					if err == nil {
+						log.Println("generateBlocks: accumulated", k)
+						records = append(records, k)
+					}
 				}
 			}
+			if generatingOPBlock {
+				m.StopMiningChan <- "generateBlocks(readyRecords, OPBlock)"
+			}
 			go m.computeOPBlock(records)
+			collectingRecords = false
 			generatingOPBlock = true
 		}
 	}
@@ -1236,6 +1274,10 @@ func (m *Miner) broadcastBlock(block Block) error {
 	}
 	m.peerMiners.Range(func(remoteMinerID, client interface{}) bool {
 		// Then it can make a remote asynchronous call
+		if remoteMinerID == block.minerID() {
+			// the sender is the same as the recv'er, continue to the next peer
+			return true
+		}
 		log.Println("broadcastBlock: to", remoteMinerID, block.hash(), "by", block.minerID())
 		reply := new(bool)
 		err = client.(*rpc.Client).Call("MinerAPI.SubmitBlock", packet, reply)
@@ -1260,6 +1302,10 @@ func (m *Miner) broadcastOperationRecord(opRecord *rfslib.OperationRecord) error
 	failedCalls := make([]string, 0, 100)
 	m.peerMiners.Range(func(remoteMinerID, client interface{}) bool {
 		nextRecordID := new(uint16)
+		if remoteMinerID == opRecord.MinerID {
+			// the sender is the same as the recv'er, continue to the next peer
+			return true
+		}
 		err := client.(*rpc.Client).Call("MinerAPI.SubmitRecord", opRecord, nextRecordID)
 		if err != nil {
 			if err == rpc.ErrShutdown {
@@ -1273,7 +1319,7 @@ func (m *Miner) broadcastOperationRecord(opRecord *rfslib.OperationRecord) error
 	})
 	if len(failedCalls) > 0 {
 		log.Println("broadcastOperationRecord: ", failedCalls)
-		return errors.New("submitBlockCall failed" + string(len(failedCalls)) + " of " + string(len(calls)))
+		return fmt.Errorf("submitBlockCall failed %d of %d", len(failedCalls), len(calls))
 	}
 	return nil
 }
@@ -1382,6 +1428,10 @@ func (m *Miner) serveClientAPI() {
 
 	log.Println("serveClientAPI: listening on:", clientAPI.listenAddr)
 
+	// options := govec.GetDefaultLogOptions()
+	// config := govec.GetDefaultConfig()
+	// config.UseTimestamps = true
+
 	// for {
 	// 	conn, err := l.Accept()
 	// 	if err != nil {
@@ -1391,7 +1441,7 @@ func (m *Miner) serveClientAPI() {
 	// }
 	// we will now serve our clients
 	clientServer.Accept(l)
-	// vrpc.ServeRPCConn(clientServer, l, logger, options)
+	// vrpc.ServeRPCConn(clientServer, l, m.Logger, options)
 	log.Println("serveClientAPI: should not reach here")
 }
 
@@ -1406,9 +1456,13 @@ func (m *Miner) serveMinerAPI() {
 		log.Fatalln("serveMinerAPI: listen error:", e)
 	}
 
-	// rpc.Register(minerAPI)
-	// rpc.HandleHTTP()
-	// http.Serve(l, nil)
+	//Initalize GoVector
+	// options := govec.GetDefaultLogOptions()
+	//Access config and set timestamps (realtime) to true
+	// config := govec.GetDefaultConfig()
+	// config.UseTimestamps = true
+	// logger := govec.InitGoVector("MinerProcess", "Miner-"+m.MinerID, config)
+	// m.Logger = logger
 
 	minerServer := rpc.NewServer()
 	err := minerServer.Register(minerAPI)
@@ -1427,7 +1481,7 @@ func (m *Miner) serveMinerAPI() {
 	// }
 
 	minerServer.Accept(l)
-	// go vrpc.ServeRPCConn(minerServer, l, logger, options)
+	// vrpc.ServeRPCConn(minerServer, l, logger, options)
 	log.Println("serveMinerAPI: should not reach here")
 }
 
@@ -1463,14 +1517,6 @@ func main() {
 	}
 
 	go miner.serveClientAPI()
-
-	//Initalize GoVector
-	// options := govec.GetDefaultLogOptions()
-	//Access config and set timestamps (realtime) to true
-	// config := govec.GetDefaultConfig()
-	// config.UseTimestamps = true
-	// logger := govec.InitGoVector("MinerProcess", "Miner-"+miner.MinerID, config)
-	// miner.Logger = logger
 
 	miner.generateBlocks()
 

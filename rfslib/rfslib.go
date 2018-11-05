@@ -392,7 +392,7 @@ func (client *rfsClient) ReadRec(fname string, recordNum uint16, record *Record)
 	// Read the record in fname at recordNum
 	op := OperationRecord{
 		FileName:  fname,
-		RecordNum: recordNum,
+		RecordNum: recordNum + 1,
 	}
 
 	for {
@@ -426,7 +426,7 @@ func (client *rfsClient) ReadRec(fname string, recordNum uint16, record *Record)
 		}
 
 		gotNum := minerRes.Data.(OperationRecord).RecordNum
-		if recordNum == gotNum {
+		if recordNum+1 == gotNum {
 			// We found the corrent record.  Read the data into
 			// the record pointer and return.
 			*record = minerRes.Data.(OperationRecord).RecordData
@@ -434,7 +434,7 @@ func (client *rfsClient) ReadRec(fname string, recordNum uint16, record *Record)
 		}
 		// Otherwise, we got an incorrent record.  This probably means
 		// that recordNum has not been confirmed yet.  Just try again.
-		log.Printf("miner returned record with serial num %d, expected %d\n", recordNum, minerRes.Data.(OperationRecord).RecordData)
+		log.Printf("miner returned record with serial num %d, expected %d\n", gotNum, recordNum+1)
 		log.Println("trying again...")
 		time.Sleep(500 * time.Millisecond)
 	}
@@ -575,6 +575,7 @@ func Initialize(localAddr string, minerAddr string) (rfs RFS, err error) {
 	config := govec.GetDefaultConfig()
 	config.UseTimestamps = true
 	// logger := govec.InitGoVector("Client", "clientlog", config)
+	// options := govec.GetDefaultLogOptions()
 
 	// client, err := vrpc.RPCDial("tcp", minerAddr, logger, options)
 	client, err := rpc.Dial("tcp", minerAddr)
