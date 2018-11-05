@@ -32,6 +32,18 @@ import (
 	"github.ugrad.cs.ubc.ca/CPSC416-2018W-T1/P1-i8b0b-e8y0b/rfslib"
 )
 
+// NOPBlockType is ...
+const (
+	NOPBlockType = iota
+	OPBlockType
+)
+
+// BlockPacket is ...
+type BlockPacket struct {
+	BlockType int
+	BlockData []byte
+}
+
 // Block is the interface for GenesisBlock, NOPBlock and OPBlock
 type Block interface {
 	hash() string
@@ -205,11 +217,61 @@ func (mapi *MinerAPI) GetChainTips(caller string, reply *map[string]int) error {
 	return nil
 }
 
+func loadBlock(packet BlockPacket) (Block, error) {
+	var block Block
+	switch packet.BlockType {
+	case OPBlockType:
+		var opBlock OPBlock
+		err := json.Unmarshal(packet.BlockData, &opBlock)
+		if err != nil {
+			return block, err
+		}
+		block = opBlock
+	case NOPBlockType:
+		var nopBlock NOPBlock
+		err := json.Unmarshal(packet.BlockData, &nopBlock)
+		if err != nil {
+			return block, err
+		}
+		block = nopBlock
+	default:
+		return block, errors.New("SubmitBlock: block type in packet not supported")
+	}
+	return block, nil
+}
+
+func dumpBlock(block Block, packet *BlockPacket) error {
+	// var packet BlockPacket
+	var err error
+	switch t := block.(type) {
+	case GenesisBlock:
+		return errors.New("loadBlock: should not load a GenesisBlock")
+	default:
+		return errors.New("loadBlock: block type not recognized")
+	case OPBlock:
+		packet.BlockType = OPBlockType
+		packet.BlockData, err = json.Marshal(t)
+		if err != nil {
+			return err
+		}
+	case NOPBlock:
+		packet.BlockType = NOPBlockType
+		packet.BlockData, err = json.Marshal(t)
+		if err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 // GetBlock RPC gets a block with a particular header hash from the local blockchain map
-func (mapi *MinerAPI) GetBlock(headerHash string, reply *Block) error {
+func (mapi *MinerAPI) GetBlock(headerHash string, packet *BlockPacket) error {
 	block, exists := mapi.miner.chain.Load(headerHash)
 	if exists {
-		*reply = block.(Block)
+		err := dumpBlock(block.(Block), packet)
+		if err != nil {
+			return err
+		}
 		return nil
 	}
 	return errors.New("The requested block does not exist in the local blockchain:" + mapi.miner.MinerID)
@@ -217,6 +279,7 @@ func (mapi *MinerAPI) GetBlock(headerHash string, reply *Block) error {
 
 func (m *Miner) addNode(minerInfo PeerMinerInfo) error {
 	log.Println("addNode: dialing", minerInfo.IncomingMinersAddr, "to", minerInfo.MinerID)
+	// client, err := jsonrpc.Dial("tcp", minerInfo.IncomingMinersAddr)
 	client, err := rpc.Dial("tcp", minerInfo.IncomingMinersAddr)
 	// client, err := vrpc.RPCDial("tcp", minerInfo.IncomingMinersAddr, m.Logger, m.GoVecOptions)
 	if err != nil {
@@ -341,7 +404,7 @@ func (m *Miner) validateBlock(block Block) error {
 		if _, ok := m.chain.Load(t.PrevHash); ok {
 			// fmt.Println("validateBlock: the previous block of this NOPBlock is:", t.prevHash())
 		} else {
-			return errors.New("validateBlock: NOPBlock " + t.hash() + " does not have a previous block")
+			return errors.New("validateBlock: NOPBlock " + t.hash() + " does not have a previous block " + t.prevHash())
 		}
 		break
 	case GenesisBlock:
@@ -729,11 +792,11 @@ func (m *Miner) requestPreviousBlocks(blockHash string) error {
 	_, exists := m.chain.Load(blockHash)
 	requestedHash := blockHash
 	for !exists {
-		var requestedBlock Block
 		found := false
+		var packet BlockPacket
 		m.peerMiners.Range(func(remoteMinerID, client interface{}) bool {
 			// Make a remote asynchronous call
-			err := client.(*rpc.Client).Call("MinerAPI.GetBlock", blockHash, &requestedBlock)
+			err := client.(*rpc.Client).Call("MinerAPI.GetBlock", requestedHash, &packet)
 			if err == rpc.ErrShutdown {
 				log.Println("requestPreviousBlocks: miner", remoteMinerID, "is not up; going to be removed")
 				m.peerMiners.Delete(remoteMinerID)
@@ -747,7 +810,12 @@ func (m *Miner) requestPreviousBlocks(blockHash string) error {
 			return true
 		})
 		if found {
-			m.chain.Store(blockHash, requestedBlock)
+			requestedBlock, err := loadBlock(packet)
+			if err != nil {
+				log.Println(err)
+				return err
+			}
+			m.chain.Store(requestedHash, requestedBlock)
 			fmt.Println("requestPreviousBlocks successed:", requestedBlock.hash())
 			requestedHash = requestedBlock.prevHash()
 			_, exists = m.chain.Load(requestedHash)
@@ -847,7 +915,7 @@ func (m *Miner) addBlock(block Block) error {
 		if err != nil {
 			log.Println("addBlock: ", err)
 			// TODO: decide if we want to request the block from other miners
-			// m.requestPreviousBlocks(block.prevHash())
+			err := m.requestPreviousBlocks(block.prevHash())
 			return err
 		}
 		return nil
@@ -858,9 +926,13 @@ func (m *Miner) addBlock(block Block) error {
 }
 
 // SubmitBlock RPC is invoked by other Miner instances and accepts the given block upon successful validation
-func (mapi *MinerAPI) SubmitBlock(block Block, received *bool) error {
+func (mapi *MinerAPI) SubmitBlock(packet BlockPacket, received *bool) error {
 	*received = true
-	err := mapi.miner.addBlock(block)
+	block, err := loadBlock(packet)
+	if err != nil {
+		return err
+	}
+	err = mapi.miner.addBlock(block)
 	if err == nil {
 		err = mapi.miner.broadcastBlock(block)
 	}
@@ -1080,11 +1152,16 @@ func (m *Miner) broadcastBlock(block Block) error {
 	calls := make([]*rpc.Call, 0, 100)
 	remoteMinerIDs := make([]string, 0, 100)
 	failedCalls := make([]string, 0, 100)
+	var packet BlockPacket
+	err := dumpBlock(block, &packet)
+	if err != nil {
+		return err
+	}
 	m.peerMiners.Range(func(remoteMinerID, client interface{}) bool {
 		// Then it can make a remote asynchronous call
 		log.Println("broadcastBlock: to", remoteMinerID, block.hash(), "by", block.minerID())
 		reply := new(bool)
-		submitBlockCall := client.(*rpc.Client).Go("MinerAPI.SubmitBlock", block, reply, nil)
+		submitBlockCall := client.(*rpc.Client).Go("MinerAPI.SubmitBlock", packet, reply, nil)
 		calls = append(calls, submitBlockCall)
 		remoteMinerIDs = append(remoteMinerIDs, block.minerID())
 		return true
@@ -1095,6 +1172,7 @@ func (m *Miner) broadcastBlock(block Block) error {
 		if replyCall.Error == nil && replyCall.Reply == true {
 			continue
 		} else {
+			log.Println("broadcastBlock: to", remoteMinerIDs[i], replyCall.Error)
 			failedCalls = append(failedCalls, remoteMinerIDs[i])
 		}
 	}
@@ -1152,6 +1230,7 @@ func (m *Miner) loadBlockChain() error {
 	for _, addr := range m.PeerMinersAddrs {
 		// client, err := vrpc.RPCDial("tcp", addr, m.Logger, m.GoVecOptions)
 		client, err := rpc.Dial("tcp", addr)
+		// client, err := jsonrpc.Dial("tcp", addr)
 		if err != nil {
 			log.Fatalln("initializeMiner: dialing:", addr, err)
 			return err
@@ -1176,6 +1255,7 @@ func (m *Miner) loadBlockChain() error {
 		log.Println("remoteChainTips", remoteChainTips)
 		if err == nil {
 			for remoteBlockHash, height := range remoteChainTips {
+				time.Sleep(time.Second)
 				reqErr := m.requestPreviousBlocks(remoteBlockHash)
 				if reqErr == nil {
 					m.chainTips.Store(remoteBlockHash, height)
@@ -1232,6 +1312,14 @@ func (m *Miner) serveClientAPI() {
 	}
 
 	log.Println("serveClientAPI: listening on:", clientAPI.listenAddr)
+
+	// for {
+	// 	conn, err := l.Accept()
+	// 	if err != nil {
+	// 		log.Fatal(err)
+	// 	}
+	// 	go clientServer.ServeCodec(jsonrpc.NewServerCodec(conn))
+	// }
 	// we will now serve our clients
 	clientServer.Accept(l)
 	// vrpc.ServeRPCConn(clientServer, l, logger, options)
@@ -1260,6 +1348,14 @@ func (m *Miner) serveMinerAPI() {
 	}
 
 	log.Println("serveMinerAPI: listening on:", minerAPI.listenAddr)
+
+	// for {
+	// 	conn, err := l.Accept()
+	// 	if err != nil {
+	// 		log.Fatal(err)
+	// 	}
+	// 	go minerServer.ServeCodec(jsonrpc.NewServerCodec(conn))
+	// }
 
 	minerServer.Accept(l)
 	// go vrpc.ServeRPCConn(minerServer, l, logger, options)
