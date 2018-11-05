@@ -570,7 +570,7 @@ func (m *Miner) getOperationRecordHeight(block Block, srcRecord rfslib.Operation
 		default:
 			return -1, errors.New(funcName + "invalid Block Type")
 		case OPBlock:
-			log.Println(funcName, "OPBlock", block.hash())
+			// log.Println(funcName, "OPBlock", block.hash())
 			for _, dstRecord := range t.Records {
 				// log.Println(funcName, confirmedBlocksNum, srcRecord.MinerID, srcRecord.OperationType, srcRecord.RecordNum)
 				// log.Println(funcName, confirmedBlocksNum, dstRecord.MinerID, dstRecord.OperationType, dstRecord.RecordNum)
@@ -1012,6 +1012,7 @@ func (m *Miner) getBlockFromLongestChain() Block {
 	if longestChainTip == nil {
 		log.Panicln("getBlockFromLongestChain: longestChainTip is nil")
 	}
+	log.Println("chaintip:", longestChainTip.hash(), maxBlocksNum)
 	return longestChainTip
 }
 
@@ -1192,13 +1193,14 @@ func (m *Miner) broadcastBlock(block Block) error {
 			if err == rpc.ErrShutdown {
 				m.peerMiners.Delete(remoteMinerID)
 			}
+			log.Println("broadcastBlock: warning", err)
 			failedCalls = append(failedCalls, remoteMinerID.(string))
 		}
 		return true
 	})
 	if len(failedCalls) > 0 {
 		log.Println("broadcastBlock: failedCalls", failedCalls)
-		return errors.New("submitBlockCall failed" + string(len(failedCalls)))
+		return errors.New("submitBlockCall failed for some calls")
 	}
 	return nil
 }
