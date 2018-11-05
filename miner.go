@@ -515,6 +515,7 @@ func (capi *ClientAPI) SubmitRecord(newOpRecord *rfslib.OperationRecord, res *rf
 	log.Println("received submitrecord call")
 	block := capi.miner.getBlockFromLongestChain()
 	funcName := "ClientAPI.SubmitRecord: "
+	log.Println(funcName, newOpRecord.OperationType, newOpRecord.FileName)
 	balance, err := capi.miner.getBalance(block, capi.miner.MinerID)
 	if err != nil {
 		return errors.New(funcName + "checking balanceRequired:" + err.Error())
@@ -590,14 +591,14 @@ func (m *Miner) getOperationRecordHeight(block Block, srcRecord rfslib.Operation
 		}
 		block = prevBlock.(Block)
 	}
-	return -1, errors.New(funcName + "the given OperationRecord cannot be found in the chain")
+	return -1, errors.New(funcName + "OperationRecord" + srcRecord.FileName + " " + string(srcRecord.RecordNum) + "cannot be found")
 }
 
 // ConfirmOperation RPC should be invoked by the RFS Client
 // upon succesfully confimation it returns nil
 func (capi *ClientAPI) ConfirmOperation(operationRecord *rfslib.OperationRecord, minerRes *rfslib.MinerRes) error {
-	log.Println("received a confirm request")
 	funcName := "ClientAPI.ConfirmOperation: "
+	// log.Println(funcName, operationRecord.FileName, operationRecord.RecordNum)
 	block := capi.miner.getBlockFromLongestChain()
 	operationRecord.MinerID = capi.miner.MinerID
 	confirmedBlocksNum, err := capi.miner.getOperationRecordHeight(block, *operationRecord)
@@ -711,6 +712,46 @@ func (m *Miner) countRecords(fname string) (uint16, error) {
 		block = prevBlock.(Block)
 	}
 	return 0, rfslib.FileDoesNotExistError(fmt.Sprintf("miner with id %s could not find file %s\n", m.MinerID, fname))
+}
+
+// readRecord returns if the closet unconfirmed matching record exists
+func (m *Miner) hasRecord(fname string, recordNum uint16) bool {
+	block := m.getBlockFromLongestChain()
+	// funcName := "hasRecord: "
+	for block.hash() != block.prevHash() {
+		prevBlock, ok := m.chain.Load(block.prevHash())
+		if !ok {
+			return false
+		}
+		switch t := block.(type) {
+		case NOPBlock:
+			break
+		case OPBlock:
+			for _, opRecord := range t.Records {
+				if opRecord.FileName == fname {
+					switch opRecord.OperationType {
+					case "create":
+						// if we can find the header of the file and the header is confirmed...
+						// (observation: if we are here then the appended blocks are not confirmed yet)
+						if opRecord.FileName == fname && recordNum == 0 {
+							return true
+						}
+					case "append":
+						// if we can find the tail record of the file
+						if opRecord.FileName == fname && recordNum >= opRecord.RecordNum {
+							return true
+						}
+					default:
+						break
+					}
+				}
+			}
+		default:
+			return false
+		}
+		block = prevBlock.(Block)
+	}
+	return false
 }
 
 // readRecord returns the closet matching record to the request record if file can be found and error otherwise
@@ -1154,6 +1195,15 @@ func (m *Miner) generateBlocks() {
 				go m.broadcastOperationRecord(&operationRecord)
 			} else {
 				recordsMap[operationRecord] = false
+				if !m.hasRecord(operationRecord.FileName, operationRecord.RecordNum) {
+					if !generatingOPBlock {
+						recordsMap[operationRecord] = true
+						go m.broadcastOperationRecord(&operationRecord)
+					} else {
+						opBlockTimer.Stop()
+					}
+
+				}
 			}
 		case <-opBlockTimer.C:
 			log.Printf("generateBlocks: accumulated enough recs; start mining OPBlocks...")
