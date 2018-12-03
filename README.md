@@ -1,5 +1,17 @@
-Coming up soon
-==============
+DFSonBlockchain
+===============
+
+## Introduction
+DFSonBlockchain implements a peer-to-peer miner network and a distributed file storage service that runs on top of it. Each miner is capable of serving mutiple clients concurrently and mines the coins needed for file operations requested by its clients; it then floods these operations to the miner network.
+
+### Usage
+```sh
+go run miner.go </path/to/config.json>
+```
+### Example
+```sh
+go run miner.go settings.json
+```
 
 ## ClientAPI
 ### func (*ClientAPI) ReadRecord
@@ -13,6 +25,12 @@ The `ReadRecord` RPC reads a confirmed record with `recordInfo.FileName` at posi
 func (capi *ClientAPI) ConfirmOperation(operationRecord *rfslib.OperationRecord, minerRes *rfslib.MinerRes) error
 ```
 The `ConfirmOperation` RPC confirms the operation by checking the `OPBlock` containing the operation is followed by some fixed number of other blocks in the longest blockchain
+
+### func (*ClientAPI) GetBalance
+```go
+func (capi *ClientAPI) GetBalance(caller string, currentBalance *uint32) error
+```
+The `GetBalance` RPC returns the current balance of the longest local block chain
 
 ## MinerAPI
 
